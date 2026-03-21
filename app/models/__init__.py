@@ -24,6 +24,10 @@ from app.models.budget import (
     Budget,
     BudgetItem,
 )
+from app.models.platform_fee import (
+    PlatformFeeRecord,
+    PlatformFeeInvoiceRule,
+)
 
 __all__ = [
     "Platform",
@@ -45,4 +49,6 @@ __all__ = [
     "BudgetItem",
     "AlertRule",
     "AlertLog",
+    "PlatformFeeRecord",
+    "PlatformFeeInvoiceRule",
 ]

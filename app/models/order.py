@@ -107,12 +107,20 @@ class Order(Base):
     refund_amount: Mapped[Decimal] = mapped_column(
         Numeric(12, 2), default=Decimal("0"), comment="退款金额"
     )
+    refund_type: Mapped[str | None] = mapped_column(
+        String(20), comment="退款类型(refund_only/return_refund)"
+    )
+    refund_complete_time: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="退款完成时间"
+    )
 
     # 时间
-    order_time: Mapped[datetime] = mapped_column(DateTime, comment="下单时间")
+    order_time: Mapped[datetime] = mapped_column(DateTime, comment="下单时间(创建时间)")
     pay_time: Mapped[datetime | None] = mapped_column(DateTime, comment="付款时间")
     ship_time: Mapped[datetime | None] = mapped_column(DateTime, comment="发货时间")
-    complete_time: Mapped[datetime | None] = mapped_column(DateTime, comment="完成时间")
+    complete_time: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="确认收货时间(平台确收时间)"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.now, onupdate=datetime.now
