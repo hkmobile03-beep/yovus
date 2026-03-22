@@ -7,11 +7,12 @@ import random
 from datetime import date, timedelta
 
 from config import (
-    CrowdLevel, ConsumptionTier, AgeGroup, Gender, Platform, DEFAULT_CONFIG
+    CrowdLevel, ConsumptionTier, AgeGroup, Gender, Platform,
+    CreativeType, PromotionType, DEFAULT_CONFIG
 )
 from models.crowd import CrowdProfile, CrowdSegment
 from models.product import Product, ProductMetrics
-from models.campaign import Campaign, AdGroup, Keyword
+from models.campaign import Campaign, AdGroup, Keyword, Creative, Promotion
 
 
 # 地域权重 (模拟真实分布)
@@ -232,6 +233,100 @@ def generate_campaigns(products: list[Product]) -> list[Campaign]:
     return campaigns
 
 
+def generate_creatives(products: list[Product]) -> list[Creative]:
+    """生成模拟创意素材数据"""
+    creatives = []
+    creative_names = {
+        CreativeType.MAIN_IMAGE: ["白底主图", "场景图", "卖点主图", "促销主图"],
+        CreativeType.VIDEO: ["15秒卖点视频", "30秒使用演示", "开箱视频"],
+        CreativeType.LONG_IMAGE: ["详情首图长图", "对比长图"],
+        CreativeType.CAROUSEL: ["多角度轮播", "场景轮播"],
+    }
+
+    for product in products[:6]:
+        for ctype, names in creative_names.items():
+            for name in names:
+                impressions = random.randint(1000, 8000)
+                # 视频类CTR通常更高
+                base_ctr = random.uniform(0.04, 0.09) if ctype == CreativeType.VIDEO else random.uniform(0.02, 0.06)
+                clicks = int(impressions * base_ctr)
+                cvr = random.uniform(0.01, 0.05)
+                orders = int(clicks * cvr)
+                fav_rate = random.uniform(0.03, 0.08)
+                cart_rate = random.uniform(0.04, 0.10)
+                cost = clicks * random.uniform(0.5, 2.5)
+
+                landing_views = int(clicks * random.uniform(0.85, 0.98))
+                bounce_rate = random.uniform(0.35, 0.80)
+
+                creatives.append(Creative(
+                    creative_id=f"CR{len(creatives)+1:04d}",
+                    name=f"{product.title[:8]}-{name}",
+                    creative_type=ctype,
+                    item_id=product.item_id,
+                    impressions=impressions,
+                    clicks=clicks,
+                    favorites=int(clicks * fav_rate),
+                    cart_adds=int(clicks * cart_rate),
+                    orders=orders,
+                    gmv=round(orders * product.price * random.uniform(0.8, 1.0), 2),
+                    cost=round(cost, 2),
+                    landing_page_views=landing_views,
+                    bounce_count=int(landing_views * bounce_rate),
+                    avg_stay_seconds=round(random.uniform(15, 120), 1),
+                ))
+
+    return creatives
+
+
+def generate_promotions() -> list[Promotion]:
+    """生成模拟促销活动数据"""
+    today = date.today()
+    promo_configs = [
+        {"name": "新品首发5元券", "type": PromotionType.COUPON, "discount": 5, "threshold": 49},
+        {"name": "满199减20", "type": PromotionType.FULL_REDUCTION, "discount": 20, "threshold": 199},
+        {"name": "满299减50", "type": PromotionType.FULL_REDUCTION, "discount": 50, "threshold": 299},
+        {"name": "限时3折秒杀", "type": PromotionType.FLASH_SALE, "discount": 70, "threshold": 0},
+        {"name": "买二送一", "type": PromotionType.BUY_GIFT, "discount": 33, "threshold": 0},
+        {"name": "三件套装特惠", "type": PromotionType.BUNDLE, "discount": 30, "threshold": 0},
+        {"name": "会员日专享8折", "type": PromotionType.MEMBERSHIP, "discount": 20, "threshold": 0},
+        {"name": "春季新品预售", "type": PromotionType.PRESALE, "discount": 15, "threshold": 0},
+        {"name": "收藏店铺领10元券", "type": PromotionType.COUPON, "discount": 10, "threshold": 79},
+        {"name": "老客户满100减15", "type": PromotionType.FULL_REDUCTION, "discount": 15, "threshold": 100},
+    ]
+
+    promotions = []
+    for i, pc in enumerate(promo_configs):
+        impressions = random.randint(5000, 30000)
+        participation_rate = random.uniform(0.05, 0.25)
+        participants = int(impressions * participation_rate)
+        cvr = random.uniform(0.08, 0.35)
+        orders = int(participants * cvr)
+        avg_price = random.uniform(80, 350)
+        gmv = orders * avg_price
+        cost = orders * pc["discount"] * random.uniform(0.6, 1.0)
+        new_ratio = random.uniform(0.2, 0.7)
+
+        promotions.append(Promotion(
+            promo_id=f"PROMO{i+1:03d}",
+            name=pc["name"],
+            promo_type=pc["type"],
+            start_date=today - timedelta(days=random.randint(5, 25)),
+            end_date=today + timedelta(days=random.randint(1, 10)),
+            discount_value=pc["discount"],
+            threshold=pc["threshold"],
+            impressions=impressions,
+            participants=participants,
+            orders=orders,
+            gmv=round(gmv, 2),
+            cost=round(cost, 2),
+            new_customer_orders=int(orders * new_ratio),
+            repeat_customer_orders=int(orders * (1 - new_ratio)),
+        ))
+
+    return promotions
+
+
 def generate_all_sample_data() -> dict:
     """生成全套模拟数据"""
     random.seed(42)  # 固定种子保证可复现
@@ -239,9 +334,13 @@ def generate_all_sample_data() -> dict:
     profiles = generate_crowd_profiles(2000)
     products = generate_products(30)
     campaigns = generate_campaigns(products)
+    creatives = generate_creatives(products)
+    promotions = generate_promotions()
 
     return {
         "profiles": profiles,
         "products": products,
         "campaigns": campaigns,
+        "creatives": creatives,
+        "promotions": promotions,
     }

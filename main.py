@@ -30,6 +30,7 @@ from analyzers.crowd_analyzer import CrowdAnalyzer
 from analyzers.cart_fav_analyzer import CartFavAnalyzer
 from analyzers.campaign_analyzer import CampaignAnalyzer
 from analyzers.roi_optimizer import ROIOptimizer
+from analyzers.conversion_optimizer import ConversionOptimizer
 from dashboard.reporter import Reporter
 
 console = Console()
@@ -37,12 +38,12 @@ console = Console()
 
 def print_banner():
     banner = """
-╔══════════════════════════════════════════════════╗
-║          淘宝营销分析系统 v1.0                    ║
-║    Taobao Marketing Analytics System             ║
-║                                                  ║
-║  人群分析 | 收藏加购 | 广告投放 | ROI优化         ║
-╚══════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════╗
+║          淘宝/天猫营销分析系统 v2.0                   ║
+║    Taobao & Tmall Marketing Analytics System         ║
+║                                                      ║
+║  人群分析 | 收藏加购 | 广告投放 | ROI优化 | 转化提升  ║
+╚══════════════════════════════════════════════════════╝
     """
     console.print(banner, style="bold red")
 
@@ -191,9 +192,72 @@ def run_roi_optimization(campaigns, products, reporter) -> dict:
     }
 
 
+def run_conversion_optimization(campaigns, products, creatives, promotions, profiles, reporter) -> dict:
+    """运行转化率优化分析"""
+    console.print("\n[bold]━━━ 模块五：转化率优化 ━━━[/bold]", style="magenta")
+
+    optimizer = ConversionOptimizer(campaigns, products, creatives, profiles)
+
+    # 1. 全链路漏斗诊断
+    funnel = optimizer.get_full_funnel_diagnosis()
+    funnel_display = {k: v for k, v in funnel.items() if k != "分环节优化建议"}
+    reporter.print_section("全链路转化漏斗诊断", funnel_display)
+
+    # 2. 关键词四象限矩阵
+    kw_matrix = optimizer.get_keyword_conversion_matrix()
+    reporter.print_section("关键词转化四象限", {
+        "关键词总数": kw_matrix.get("关键词总数", 0),
+        "四象限分布": kw_matrix.get("四象限分布", {}),
+    })
+    strategies = kw_matrix.get("四象限策略", {})
+    for quad_name, quad_data in strategies.items():
+        if quad_data.get("关键词"):
+            reporter.print_section(f"{quad_name} (共{quad_data['数量']}个)", quad_data["关键词"][:5])
+            console.print(f"  [yellow]策略:[/yellow] {quad_data['策略']}")
+
+    # 3. 创意A/B测试分析
+    creative_analysis = optimizer.get_creative_ab_analysis()
+    if "error" not in creative_analysis:
+        reporter.print_section("创意素材A/B分析", {
+            "创意总数": creative_analysis["创意总数"],
+            "按类型对比": creative_analysis["按类型对比"],
+        })
+        reporter.print_section("CTR最高创意", creative_analysis["CTR最高创意TOP5"])
+        if creative_analysis.get("落地页诊断"):
+            reporter.print_section("落地页诊断", creative_analysis["落地页诊断"])
+        reporter.print_section("创意优化建议", creative_analysis["优化建议"])
+
+    # 4. 促销活动转化
+    promo_analysis = optimizer.get_promotion_conversion_analysis(promotions)
+    if "error" not in promo_analysis:
+        reporter.print_section("促销活动转化分析", {
+            "活动总数": promo_analysis["活动总数"],
+            "按类型汇总": promo_analysis["按类型汇总"],
+        })
+        reporter.print_section("ROI最高活动", promo_analysis["ROI最高活动TOP5"])
+        reporter.print_section("促销策略建议", promo_analysis["促销策略建议"])
+
+    # 5. 平台转化对比
+    platform_comp = optimizer.get_platform_conversion_comparison()
+    reporter.print_section("各平台转化对比", platform_comp)
+
+    # 6. 转化提升方案
+    improvement = optimizer.get_conversion_improvement_plan()
+    reporter.print_section("系统化转化率提升方案", improvement)
+
+    return {
+        "全链路诊断": funnel_display,
+        "关键词四象限": kw_matrix.get("四象限分布", {}),
+        "创意分析": creative_analysis if "error" not in creative_analysis else {},
+        "促销分析": promo_analysis if "error" not in promo_analysis else {},
+        "平台对比": platform_comp,
+        "提升方案": improvement,
+    }
+
+
 def main():
-    parser = argparse.ArgumentParser(description="淘宝营销分析系统")
-    parser.add_argument("--module", choices=["crowd", "cart", "campaign", "roi"],
+    parser = argparse.ArgumentParser(description="淘宝/天猫营销分析系统")
+    parser.add_argument("--module", choices=["crowd", "cart", "campaign", "roi", "conversion"],
                         help="仅运行指定模块")
     parser.add_argument("--export", action="store_true", help="导出HTML报告")
     parser.add_argument("--profiles", type=int, default=2000, help="模拟人群数量")
@@ -206,17 +270,24 @@ def main():
     profiles = data["profiles"]
     products = data["products"]
     campaigns = data["campaigns"]
+    creatives = data["creatives"]
+    promotions = data["promotions"]
 
     reporter = Reporter(DEFAULT_CONFIG.report_output_dir)
     report_data = {}
 
-    console.print(f"[green]数据就绪: {len(profiles)}个用户 | {len(products)}个商品 | {len(campaigns)}个投放计划[/green]\n")
+    console.print(
+        f"[green]数据就绪: {len(profiles)}个用户 | {len(products)}个商品 | "
+        f"{len(campaigns)}个投放计划 | {len(creatives)}个创意 | {len(promotions)}个促销活动[/green]\n"
+    )
 
     modules = {
         "crowd": ("人群分析", lambda: run_crowd_analysis(profiles, reporter)),
         "cart": ("收藏加购", lambda: run_cart_fav_analysis(products, profiles, reporter)),
         "campaign": ("投放分析", lambda: run_campaign_analysis(campaigns, reporter)),
         "roi": ("ROI优化", lambda: run_roi_optimization(campaigns, products, reporter)),
+        "conversion": ("转化率优化", lambda: run_conversion_optimization(
+            campaigns, products, creatives, promotions, profiles, reporter)),
     }
 
     if args.module:

@@ -10,6 +10,28 @@ class Platform(Enum):
     ZHITONGCHE = "直通车"
     YINLIMOFA = "引力魔方"
     WANXIANGTAI = "万相台"
+    PINXIAOBAO = "品销宝"
+    TMALL_ZHITONGCHE = "天猫直通车"
+
+
+class CreativeType(Enum):
+    """创意素材类型"""
+    MAIN_IMAGE = "主图"
+    VIDEO = "短视频"
+    LONG_IMAGE = "长图"
+    CAROUSEL = "轮播图"
+    LIVE_COVER = "直播封面"
+
+
+class PromotionType(Enum):
+    """促销活动类型"""
+    COUPON = "优惠券"
+    FULL_REDUCTION = "满减"
+    FLASH_SALE = "限时秒杀"
+    BUY_GIFT = "买赠"
+    BUNDLE = "套装优惠"
+    MEMBERSHIP = "会员专享"
+    PRESALE = "预售"
 
 
 class CrowdLevel(Enum):
@@ -71,6 +93,14 @@ class SystemConfig:
 
     # 收藏加购转化周期 (天)
     fav_cart_conversion_window: int = 15
+
+    # 转化率优化目标
+    target_ctr: float = 4.0          # 目标点击率 %
+    target_cvr: float = 3.0          # 目标转化率 %
+    target_fav_cart_rate: float = 12.0  # 目标收藏加购率 %
+
+    # 落地页跳出率警戒线
+    bounce_rate_warning: float = 70.0  # 跳出率 > 70% 告警
 
     # 报表输出路径
     report_output_dir: str = "./reports"
