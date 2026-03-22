@@ -13,7 +13,7 @@ from app.models.finance import (
     VoucherEntry,
     VoucherType,
 )
-from app.models.order import Order, OrderItem, OrderStatus
+from app.models.order import Order, OrderStatus
 
 
 class AccountingService:

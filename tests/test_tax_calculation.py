@@ -2,8 +2,6 @@
 
 from decimal import Decimal
 
-import pytest
-
 from app.services.budget_service import BudgetService
 
 

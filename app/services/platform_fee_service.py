@@ -24,7 +24,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.platform_fee import (
     InvoiceStatus,
-    PlatformFeeInvoiceRule,
     PlatformFeeRecord,
     PlatformFeeType,
 )

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.schemas.tax import CorporateIncomeTax, TaxSummary, VATCalculation
+from app.schemas.tax import TaxSummary, VATCalculation
 from app.services.tax_service import TaxService
 
 router = APIRouter()

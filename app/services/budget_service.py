@@ -12,7 +12,6 @@ from app.models.budget import (
     AlertRule,
     AlertStatus,
     Budget,
-    BudgetItem,
     BudgetType,
 )
 
@@ -127,7 +126,7 @@ class BudgetService:
     async def check_alerts(self) -> list[AlertLog]:
         """检查所有预警规则并触发预警"""
         result = await self.db.execute(
-            select(AlertRule).where(AlertRule.is_active == True)
+            select(AlertRule).where(AlertRule.is_active == True)  # noqa: E712 (SQLAlchemy)
         )
         rules = result.scalars().all()
 

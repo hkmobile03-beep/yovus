@@ -20,7 +20,7 @@
 """
 
 import enum
-from datetime import date, datetime
+from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import and_, or_, select, func
@@ -273,7 +273,7 @@ class RevenueCalibrationService:
             Order.order_time <= period_end,
             Order.status.notin_([OrderStatus.CANCELLED, OrderStatus.PENDING]),
             or_(
-                Order.complete_time == None,
+                Order.complete_time == None,  # noqa: E711 (SQLAlchemy IS NULL)
                 Order.complete_time < period_start,
                 Order.complete_time > period_end,
             ),
@@ -316,7 +316,7 @@ class RevenueCalibrationService:
                 Order.order_time <= period_end,
                 Order.refund_amount > 0,
                 or_(
-                    Order.refund_complete_time == None,
+                    Order.refund_complete_time == None,  # noqa: E711 (SQLAlchemy IS NULL)
                     Order.refund_complete_time < period_start,
                     Order.refund_complete_time > period_end,
                 ),

@@ -1,6 +1,5 @@
 """税务服务 - 增值税、企业所得税、附加税计算与申报数据生成"""
 
-from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import and_, select
@@ -66,7 +65,7 @@ class TaxService:
                 and_(
                     VATInvoice.direction == InvoiceDirection.INPUT,
                     VATInvoice.period == period,
-                    VATInvoice.is_certified == True,
+                    VATInvoice.is_certified == True,  # noqa: E712 (SQLAlchemy)
                 )
             )
         )
