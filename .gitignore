@@ -23,3 +23,4 @@ env/
 
 uploads/
 tmp/
+node_modules/

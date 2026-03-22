@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from app.api.v1 import (
+    ai,
     alerts,
     analytics,
     orders,
@@ -27,3 +28,4 @@ router.include_router(
 router.include_router(tax.router, prefix="/tax", tags=["税务申报"])
 router.include_router(analytics.router, prefix="/analytics", tags=["利润分析"])
 router.include_router(alerts.router, prefix="/alerts", tags=["预算预警"])
+router.include_router(ai.router)

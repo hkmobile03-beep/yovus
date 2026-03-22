@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+@theme {
+  /* 和風配色 - Japanese minimalist palette */
+  --color-ink: #1a1a1a;
+  --color-ink-light: #4a4a4a;
+  --color-ink-muted: #8a8a8a;
+  --color-paper: #fafaf8;
+  --color-paper-warm: #f5f4f0;
+  --color-paper-dark: #edecea;
+  --color-border: #e0dfdb;
+  --color-border-light: #eeede9;
+
+  /* 素雅点缀色 */
+  --color-indigo: #3d5a80;
+  --color-indigo-light: #5b7ea1;
+  --color-vermillion: #c1554d;
+  --color-vermillion-light: #d4756e;
+  --color-moss: #5a7247;
+  --color-moss-light: #7a9467;
+  --color-gold: #b8860b;
+  --color-gold-light: #d4a843;
+  --color-wisteria: #7b6b8a;
+
+  --font-sans: 'Noto Sans SC', 'Hiragino Sans', 'Microsoft YaHei', sans-serif;
+  --font-serif: 'Noto Serif SC', 'Songti SC', serif;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--color-paper);
+  color: var(--color-ink);
+  font-weight: 300;
+  letter-spacing: 0.02em;
+  -webkit-font-smoothing: antialiased;
+  margin: 0;
+}
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 2px; }
