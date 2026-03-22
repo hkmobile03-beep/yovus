@@ -3,13 +3,18 @@
 from decimal import Decimal
 from datetime import datetime
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, cast, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.order import Order, OrderStatus, Platform
 from app.models.finance import AccountingVoucher
 from app.models.reconciliation import ReconciliationTask
 from app.models.tax import VATInvoice
+
+
+def _period_filter(column, period: str):
+    """兼容 PostgreSQL (to_char) 和 SQLite (strftime) 的期间过滤"""
+    return func.strftime("%Y-%m", column) == period
 
 
 class AIAnalysisService:
@@ -55,7 +60,7 @@ class AIAnalysisService:
             func.avg(Order.total_amount).label("avg_order"),
         )
         if period:
-            query = query.where(func.to_char(Order.order_time, "YYYY-MM") == period)
+            query = query.where(_period_filter(Order.order_time, period))
 
         result = await self.db.execute(query)
         row = result.one_or_none()
@@ -69,7 +74,7 @@ class AIAnalysisService:
             func.sum(Order.total_amount).label("amount"),
         ).group_by(Order.platform)
         if period:
-            platform_query = platform_query.where(func.to_char(Order.order_time, "YYYY-MM") == period)
+            platform_query = platform_query.where(_period_filter(Order.order_time, period))
         platform_result = await self.db.execute(platform_query)
         platforms = platform_result.all()
 
@@ -153,7 +158,7 @@ class AIAnalysisService:
         ).where(Order.status == OrderStatus.COMPLETED)
 
         if period:
-            query = query.where(func.to_char(Order.complete_time, "YYYY-MM") == period)
+            query = query.where(_period_filter(Order.complete_time, period))
 
         result = await self.db.execute(query)
         row = result.one()
