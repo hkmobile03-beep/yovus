@@ -18,7 +18,7 @@ class Settings(BaseSettings):
 
     # 应用
     app_env: str = "development"
-    app_debug: bool = True
+    app_debug: bool = False
 
     # 税务配置 - 一般纳税人
     default_vat_rate: Decimal = Decimal("0.13")  # 增值税基本税率13%
