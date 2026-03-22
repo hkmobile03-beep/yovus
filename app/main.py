@@ -52,24 +52,6 @@ app.add_middleware(
 app.include_router(v1_router)
 
 
-@app.get("/")
-async def root():
-    return {
-        "system": "中国电商财务对账系统",
-        "version": "0.1.0",
-        "modules": [
-            "核算模块 - /api/v1/orders",
-            "双口径收入对账 - /api/v1/revenue",
-            "对账模块 - /api/v1/reconciliation",
-            "平台费用发票 - /api/v1/platform-fees",
-            "税务模块 - /api/v1/tax",
-            "利润分析 - /api/v1/analytics",
-            "预算预警 - /api/v1/alerts",
-        ],
-        "docs": "/docs",
-    }
-
-
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
@@ -86,3 +68,12 @@ if STATIC_DIR.exists():
         if file_path.exists() and file_path.is_file():
             return FileResponse(file_path)
         return FileResponse(STATIC_DIR / "index.html")
+else:
+
+    @app.get("/")
+    async def root():
+        return {
+            "system": "中国电商财务对账系统",
+            "version": "0.1.0",
+            "docs": "/docs",
+        }

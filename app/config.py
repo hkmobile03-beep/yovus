@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # 数据库
-    database_url: str = "postgresql+asyncpg://postgres:password@localhost:5432/yovus_finance"
+    database_url: str = "sqlite+aiosqlite:///./yovus_finance.db"
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
