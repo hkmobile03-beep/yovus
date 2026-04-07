@@ -1,5 +1,5 @@
-# YOVUS - AI映像人物置換システム
-# Requirements for RTX 5070 Laptop (8GB VRAM)
+# YOVUS v2.0 - AI映像人物置換システム
+# Compatible with RTX 5070 Laptop (8GB VRAM)
 
 # ── Core ──
 gradio>=4.44.0
@@ -8,8 +8,8 @@ opencv-python>=4.8.0
 Pillow>=10.0.0
 tqdm>=4.65.0
 
-# ── Video Processing ──
-# ffmpeg-python>=0.2.0  # Optional: ffmpeg must be installed separately
+# ── Video ──
+# FFmpeg required (install separately: winget install ffmpeg)
 
 # ── Face Detection & Swap ──
 insightface>=0.7.3
@@ -27,18 +27,22 @@ mediapipe>=0.10.0
 # ── Pose Estimation ──
 controlnet-aux>=0.0.7
 
-# ── Body Generation (ControlNet + LoRA) ──
-# Install separately due to CUDA version dependency:
-# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# ── Generation (ControlNet + LoRA) ──
+# PyTorch: install separately for your CUDA version:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 diffusers>=0.27.0
 transformers>=4.36.0
 accelerate>=0.25.0
 safetensors>=0.4.0
-xformers>=0.0.23
+peft>=0.7.0
 
 # ── GPU Monitoring ──
 pynvml>=11.5.0
 
+# ── Cloud APIs ──
+replicate>=0.25.0
+fal-client>=0.4.0
+httpx>=0.25.0
+
 # ── Utilities ──
 aiofiles>=23.0
-httpx>=0.25.0

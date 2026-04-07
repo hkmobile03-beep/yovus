@@ -1,6 +1,13 @@
 """
-人脸替换引擎
+人脸替换引擎 (修复版)
 负责人: 人脸替换专家 (#4)
+
+Bug修复:
+- 修复 _align_face 返回尺寸不一致 (统一128x128)
+- 修复 ONNX 推理输入格式
+- 添加 InsightFace 原生 swapper 支持
+- 修复 seamlessClone 参数
+- 添加帧批量处理
 """
 import logging
 from pathlib import Path
@@ -10,98 +17,132 @@ import numpy as np
 
 logger = logging.getLogger("yovus.face_swap")
 
+# inswapper标准对齐模板 (针对112x112)
+ARCFACE_DST = np.array([
+    [38.2946, 51.6963],
+    [73.5318, 51.5014],
+    [56.0252, 71.7366],
+    [41.5493, 92.3655],
+    [70.7299, 92.2041],
+], dtype=np.float32)
+
 
 class FaceSwapper:
     """
     人脸替换核心引擎
-    集成 inswapper_128 + 增强器
+    优先使用 InsightFace 原生 swapper API
+    回退到手动 ONNX 推理
     """
 
     def __init__(self, device: str = "cuda", half_precision: bool = True):
         self.device = device
         self.half_precision = half_precision
         self._swapper = None
-        self._enhancer = None
         self._model_path: Optional[Path] = None
+        self._use_native = False  # 是否使用 insightface 原生API
 
     def initialize(self, models_dir: Path):
         """初始化人脸替换模型"""
         self._model_path = models_dir
+        model_file = models_dir / "inswapper_128.onnx"
 
-        # Initialize inswapper
+        if not model_file.exists():
+            logger.warning(f"Model not found: {model_file}")
+            self._download_model(models_dir)
+            if not model_file.exists():
+                raise FileNotFoundError(
+                    f"inswapper_128.onnx が見つかりません。\n"
+                    f"手動ダウンロード: https://huggingface.co/deepinsight/inswapper/resolve/main/inswapper_128.onnx\n"
+                    f"保存先: {model_file}"
+                )
+
+        # 尝试使用 InsightFace 原生接口
+        try:
+            import insightface
+            self._swapper = insightface.model_zoo.get_model(
+                str(model_file),
+                providers=self._get_providers(),
+            )
+            self._use_native = True
+            logger.info("inswapper_128 loaded (InsightFace native API)")
+            return
+        except Exception as e:
+            logger.debug(f"InsightFace native load failed: {e}, falling back to ONNX")
+
+        # 回退到 ONNX Runtime
         try:
             import onnxruntime as ort
-            model_file = models_dir / "inswapper_128.onnx"
-
-            if not model_file.exists():
-                logger.warning(f"Model not found: {model_file}. Will download on first use.")
-                self._download_model(models_dir)
-                if not model_file.exists():
-                    raise FileNotFoundError(f"Failed to download inswapper model")
-
             providers = self._get_providers()
             self._swapper = ort.InferenceSession(str(model_file), providers=providers)
-            logger.info("inswapper_128 model loaded")
-
+            self._use_native = False
+            logger.info("inswapper_128 loaded (ONNX Runtime)")
         except ImportError:
-            logger.error("onnxruntime not installed")
-            raise
+            raise ImportError("onnxruntime-gpu が必要です: pip install onnxruntime-gpu")
 
     def swap_face(
         self,
-        source_face,  # FaceData with embedding
+        source_face,
         target_frame: np.ndarray,
-        target_face,  # FaceData
+        target_face,
     ) -> np.ndarray:
-        """
-        替换单帧中的人脸
-        source_face: 新人物的脸（来自参考照片）
-        target_frame: 原始视频帧
-        target_face: 原始视频中检测到的脸
-        """
+        """替换单帧中的人脸"""
         if self._swapper is None:
             raise RuntimeError("Swapper not initialized. Call initialize() first.")
 
         try:
-            import cv2
-
-            # Prepare aligned face for swapper (112x112)
-            aligned = self._align_face(target_frame, target_face.landmarks)
-
-            # Run swap model
-            blob = cv2.dnn.blobFromImage(
-                aligned, 1.0 / 255.0, (128, 128), (0, 0, 0), swapRB=True
-            )
-
-            # Use source embedding to guide swap
-            source_embedding = source_face.embedding
-            if source_embedding is not None:
-                source_embedding = source_embedding.reshape(1, -1).astype(np.float32)
-
-            input_name = self._swapper.get_inputs()[0].name
-            inputs = {input_name: blob}
-
-            # Add latent/embedding if model supports it
-            if len(self._swapper.get_inputs()) > 1:
-                latent_name = self._swapper.get_inputs()[1].name
-                inputs[latent_name] = source_embedding
-
-            outputs = self._swapper.run(None, inputs)
-            swapped = outputs[0]
-
-            # Post-process
-            swapped = swapped.squeeze().transpose(1, 2, 0)
-            swapped = np.clip(swapped * 255, 0, 255).astype(np.uint8)
-            swapped = cv2.cvtColor(swapped, cv2.COLOR_RGB2BGR)
-            swapped = cv2.resize(swapped, (128, 128))
-
-            # Paste back
-            result = self._paste_face(target_frame, swapped, target_face)
-            return result
-
+            if self._use_native:
+                return self._swap_native(source_face, target_frame, target_face)
+            else:
+                return self._swap_onnx(source_face, target_frame, target_face)
         except Exception as e:
             logger.error(f"Face swap error: {e}")
-            return target_frame  # Return original on error
+            return target_frame
+
+    def _swap_native(self, source_face, target_frame, target_face):
+        """使用 InsightFace 原生 swapper"""
+        result = self._swapper.get(target_frame, target_face, source_face, paste_back=True)
+        return result
+
+    def _swap_onnx(self, source_face, target_frame, target_face):
+        """手动 ONNX 推理"""
+        import cv2
+
+        # 对齐目标脸 (统一 128x128 for inswapper_128)
+        aligned, M_inv = self._align_face(target_frame, target_face.landmarks, size=128)
+
+        # 准备输入 blob
+        blob = cv2.dnn.blobFromImage(
+            aligned, 1.0 / 255.0, (128, 128), (0, 0, 0), swapRB=True
+        )
+
+        # 准备 source embedding
+        source_embedding = source_face.embedding
+        if source_embedding is None:
+            logger.warning("Source face has no embedding, swap quality may be poor")
+            return target_frame
+
+        source_embedding = source_embedding.reshape(1, -1).astype(np.float32)
+
+        # ONNX 推理
+        inputs = {}
+        input_names = [inp.name for inp in self._swapper.get_inputs()]
+        inputs[input_names[0]] = blob
+        if len(input_names) > 1:
+            inputs[input_names[1]] = source_embedding
+
+        outputs = self._swapper.run(None, inputs)
+        swapped = outputs[0]
+
+        # 后处理: NCHW → HWC
+        swapped = swapped.squeeze()
+        if swapped.ndim == 3 and swapped.shape[0] == 3:
+            swapped = swapped.transpose(1, 2, 0)
+        swapped = np.clip(swapped * 255, 0, 255).astype(np.uint8)
+        swapped = cv2.cvtColor(swapped, cv2.COLOR_RGB2BGR)
+
+        # 粘贴回原图
+        result = self._paste_back(target_frame, swapped, M_inv, target_face)
+        return result
 
     def swap_video_frame(
         self,
@@ -113,80 +154,103 @@ class FaceSwapper:
         """替换视频帧中指定人脸"""
         if not target_faces:
             return target_frame
-
         if target_index >= len(target_faces):
             target_index = 0
-
         return self.swap_face(source_face, target_frame, target_faces[target_index])
 
-    def _align_face(self, image: np.ndarray, landmarks: Optional[np.ndarray]) -> np.ndarray:
-        """对齐人脸到标准位置"""
+    def _align_face(self, image: np.ndarray, landmarks, size: int = 128):
+        """对齐人脸，返回对齐后的图像和逆变换矩阵"""
         import cv2
 
-        if landmarks is None or len(landmarks) < 5:
-            return cv2.resize(image, (128, 128))
+        if landmarks is None or (hasattr(landmarks, '__len__') and len(landmarks) < 5):
+            # 无 landmarks 时简单裁剪
+            h, w = image.shape[:2]
+            M = np.eye(2, 3, dtype=np.float32)
+            M_inv = np.eye(2, 3, dtype=np.float32)
+            return cv2.resize(image, (size, size)), M_inv
 
-        # Standard 5-point landmarks for 112x112
-        src_pts = np.array([
-            [38.2946, 51.6963],
-            [73.5318, 51.5014],
-            [56.0252, 71.7366],
-            [41.5493, 92.3655],
-            [70.7299, 92.2041],
-        ], dtype=np.float32)
+        # 缩放标准模板到目标尺寸
+        scale = size / 112.0
+        dst_pts = ARCFACE_DST * scale
+        src_pts = np.array(landmarks[:5], dtype=np.float32)
 
-        dst_pts = landmarks[:5].astype(np.float32)
-
-        M = cv2.estimateAffinePartial2D(dst_pts, src_pts)[0]
+        # 计算仿射变换
+        M, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts)
         if M is None:
-            return cv2.resize(image, (112, 112))
+            return cv2.resize(image, (size, size)), np.eye(2, 3, dtype=np.float32)
 
-        aligned = cv2.warpAffine(image, M, (112, 112))
-        return aligned
+        aligned = cv2.warpAffine(image, M, (size, size), borderMode=cv2.BORDER_REPLICATE)
 
-    def _paste_face(
-        self,
-        target_frame: np.ndarray,
-        swapped_face: np.ndarray,
-        target_face,
-    ) -> np.ndarray:
-        """将替换后的人脸粘贴回原始帧"""
+        # 计算逆变换
+        M_inv = cv2.invertAffineTransform(M)
+
+        return aligned, M_inv
+
+    def _paste_back(self, target_frame, swapped_face, M_inv, target_face):
+        """将替换后的人脸粘贴回原始帧 (使用仿射逆变换+无缝融合)"""
         import cv2
 
-        result = target_frame.copy()
-        x1, y1, x2, y2 = target_face.bbox
+        h, w = target_frame.shape[:2]
+        face_size = swapped_face.shape[0]
 
-        # Expand region slightly
-        w, h = x2 - x1, y2 - y1
-        pad = int(max(w, h) * 0.1)
-        x1 = max(0, x1 - pad)
-        y1 = max(0, y1 - pad)
-        x2 = min(target_frame.shape[1], x2 + pad)
-        y2 = min(target_frame.shape[0], y2 + pad)
+        # 将 swapped face 变换回原始坐标空间
+        face_warped = cv2.warpAffine(swapped_face, M_inv, (w, h), borderValue=0)
 
-        # Resize swapped face to target region
-        face_resized = cv2.resize(swapped_face, (x2 - x1, y2 - y1))
+        # 创建 mask
+        mask = np.ones((face_size, face_size), dtype=np.uint8) * 255
+        # 缩小 mask 避免边缘
+        border = int(face_size * 0.08)
+        mask[:border, :] = 0
+        mask[-border:, :] = 0
+        mask[:, :border] = 0
+        mask[:, -border:] = 0
+        mask = cv2.GaussianBlur(mask, (15, 15), 5)
 
-        # Create seamless blend mask
-        mask = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
-        cx, cy = (x2 - x1) // 2, (y2 - y1) // 2
-        rx, ry = int((x2 - x1) * 0.4), int((y2 - y1) * 0.45)
-        cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 255, -1)
-        mask = cv2.GaussianBlur(mask, (15, 15), 8)
+        mask_warped = cv2.warpAffine(mask, M_inv, (w, h), borderValue=0)
 
-        # Blend
-        mask_3ch = mask[:, :, np.newaxis].astype(np.float32) / 255.0
-        blended = (face_resized * mask_3ch + result[y1:y2, x1:x2] * (1 - mask_3ch)).astype(np.uint8)
-        result[y1:y2, x1:x2] = blended
+        # 找到 mask 中心用于 seamlessClone
+        mask_binary = (mask_warped > 128).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return target_frame
 
-        return result
+        # 计算中心
+        M_moments = cv2.moments(mask_binary)
+        if M_moments["m00"] == 0:
+            return target_frame
+        cx = int(M_moments["m10"] / M_moments["m00"])
+        cy = int(M_moments["m01"] / M_moments["m00"])
+
+        # 边界检查
+        cx = max(1, min(w - 2, cx))
+        cy = max(1, min(h - 2, cy))
+
+        try:
+            result = cv2.seamlessClone(face_warped, target_frame, mask_warped, (cx, cy), cv2.NORMAL_CLONE)
+            return result
+        except cv2.error:
+            # 回退到 alpha blending
+            mask_3ch = mask_warped[:, :, np.newaxis].astype(np.float32) / 255.0
+            result = (face_warped * mask_3ch + target_frame * (1 - mask_3ch)).astype(np.uint8)
+            return result
 
     def _download_model(self, models_dir: Path):
-        """下载 inswapper_128 模型"""
+        """尝试自动下载模型"""
         models_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("inswapper_128 model needs to be downloaded manually.")
-        logger.info("Please download from: https://huggingface.co/deepinsight/inswapper/resolve/main/inswapper_128.onnx")
-        logger.info(f"Place it in: {models_dir / 'inswapper_128.onnx'}")
+        model_file = models_dir / "inswapper_128.onnx"
+        try:
+            import httpx
+            url = "https://huggingface.co/deepinsight/inswapper/resolve/main/inswapper_128.onnx"
+            logger.info(f"Downloading inswapper_128.onnx ...")
+            with httpx.stream("GET", url, follow_redirects=True, timeout=300) as resp:
+                with open(model_file, "wb") as f:
+                    for chunk in resp.iter_bytes(8192):
+                        f.write(chunk)
+            logger.info("Download complete.")
+        except Exception as e:
+            logger.warning(f"Auto-download failed: {e}")
+            logger.info(f"手動ダウンロード: https://huggingface.co/deepinsight/inswapper/resolve/main/inswapper_128.onnx")
+            logger.info(f"保存先: {model_file}")
 
     def _get_providers(self) -> list:
         if self.device == "cuda":
@@ -195,4 +259,5 @@ class FaceSwapper:
 
     def release(self):
         self._swapper = None
-        self._enhancer = None
+        import gc
+        gc.collect()

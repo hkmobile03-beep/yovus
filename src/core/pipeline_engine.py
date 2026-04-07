@@ -7,7 +7,7 @@ import time
 import logging
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import Optional, Callable, Any
+from typing import Optional, Callable
 from pathlib import Path
 
 logger = logging.getLogger("yovus.pipeline")
@@ -37,55 +37,61 @@ class PipelineJob:
     source_video: Path
     reference_photos_dir: Path
     output_path: Path
-    mode: str = "face_only"  # face_only | face_and_body | full_replace
+    mode: str = "face_only"
     stages: list = field(default_factory=list)
     current_stage: int = 0
     total_progress: float = 0.0
     status: str = "pending"
     results: list = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
+    # 共享数据: 各阶段通过此字典传递中间结果
+    shared_data: dict = field(default_factory=dict)
 
 
 class PipelineEngine:
-    """
-    核心流水线引擎 - 编排所有处理阶段
-    """
+    """核心流水线引擎"""
 
     STAGE_DEFINITIONS = {
         "face_only": [
             ("video_decode", "映像解析", 0.05),
-            ("face_detect_source", "顔検出（原始）", 0.10),
-            ("face_detect_reference", "顔検出（参照）", 0.10),
-            ("face_swap", "顔交換", 0.45),
+            ("face_detect_reference", "参照顔検出", 0.10),
+            ("face_swap", "顔交換", 0.50),
             ("face_enhance", "顔補正", 0.15),
-            ("video_encode", "映像合成", 0.10),
+            ("video_encode", "映像合成", 0.15),
             ("post_process", "後処理", 0.05),
         ],
         "face_and_body": [
             ("video_decode", "映像解析", 0.05),
-            ("face_detect_source", "顔検出（原始）", 0.05),
-            ("face_detect_reference", "顔検出（参照）", 0.05),
+            ("face_detect_reference", "参照顔検出", 0.05),
             ("pose_estimate", "姿勢推定", 0.10),
             ("body_segment", "人物分割", 0.10),
             ("face_swap", "顔交換", 0.20),
             ("body_generate", "身体生成", 0.20),
             ("composite", "合成融合", 0.10),
             ("face_enhance", "顔補正", 0.05),
-            ("video_encode", "映像合成", 0.05),
+            ("video_encode", "映像合成", 0.10),
             ("post_process", "後処理", 0.05),
         ],
         "full_replace": [
             ("video_decode", "映像解析", 0.03),
-            ("face_detect_reference", "顔検出（参照）", 0.05),
+            ("face_detect_reference", "参照顔検出", 0.05),
             ("lora_train", "LoRAモデル学習", 0.15),
             ("pose_estimate", "姿勢推定", 0.07),
-            ("body_segment", "人物分割", 0.07),
-            ("face_swap", "顔交換", 0.15),
-            ("body_generate", "身体生成（ControlNet）", 0.20),
+            ("body_segment", "人物分割", 0.05),
+            ("inpaint_mask", "Inpaint マスク生成", 0.05),
+            ("face_swap", "顔交換", 0.12),
+            ("body_generate", "身体生成（ControlNet）", 0.18),
             ("composite", "合成融合", 0.08),
             ("face_enhance", "顔補正", 0.05),
             ("temporal_smooth", "時間軸平滑化", 0.05),
-            ("video_encode", "映像合成", 0.05),
+            ("video_encode", "映像合成", 0.07),
+            ("post_process", "後処理", 0.05),
+        ],
+        "cloud": [
+            ("upload_reference", "参照写真アップロード", 0.10),
+            ("cloud_train", "クラウド学習", 0.30),
+            ("cloud_swap", "クラウド置換処理", 0.40),
+            ("download_result", "結果ダウンロード", 0.15),
             ("post_process", "後処理", 0.05),
         ],
     }
@@ -111,17 +117,25 @@ class PipelineEngine:
         formatted = f"[{timestamp}] {message}"
         logger.info(message)
         if self._log_callback:
-            self._log_callback(formatted, level)
+            try:
+                self._log_callback(formatted, level)
+            except TypeError:
+                # Fallback: callback may only accept one arg
+                self._log_callback(formatted)
 
     def _update_progress(self, progress: float, stage_name: str = ""):
         if self._progress_callback:
-            self._progress_callback(progress, stage_name)
+            try:
+                self._progress_callback(progress, stage_name)
+            except Exception:
+                pass
 
     def cancel(self):
         self._cancel_flag = True
         self._log("処理をキャンセル中...")
 
-    async def run(self, job: PipelineJob) -> list[StageResult]:
+    def run_sync(self, job: PipelineJob) -> list:
+        """同步运行 (避免Gradio事件循环冲突)"""
         self._current_job = job
         self._cancel_flag = False
         job.status = "running"
@@ -143,17 +157,14 @@ class PipelineEngine:
 
             handler = self._stage_handlers.get(stage_id)
             if not handler:
-                self._log(f"  ⚠ {stage_id} ハンドラ未登録 - スキップ")
+                self._log(f"  -- {stage_id} ハンドラ未登録 - スキップ")
                 results.append(StageResult(stage_id, StageStatus.SKIPPED, "No handler"))
                 cumulative_weight += weight
                 continue
 
             start_time = time.time()
             try:
-                if asyncio.iscoroutinefunction(handler):
-                    output = await handler(job, results)
-                else:
-                    output = handler(job, results)
+                output = handler(job, results)
 
                 elapsed = time.time() - start_time
                 result = StageResult(
@@ -165,7 +176,7 @@ class PipelineEngine:
                 )
                 results.append(result)
                 cumulative_weight += weight
-                self._log(f"  ✓ {stage_label} 完了 ({elapsed:.1f}s)")
+                self._log(f"  OK {stage_label} 完了 ({elapsed:.1f}s)")
 
             except Exception as e:
                 elapsed = time.time() - start_time
@@ -176,7 +187,7 @@ class PipelineEngine:
                     elapsed_seconds=elapsed,
                 )
                 results.append(result)
-                self._log(f"  ✗ {stage_label} エラー: {e}")
+                self._log(f"  NG {stage_label} エラー: {e}")
                 job.status = "failed"
                 break
 
