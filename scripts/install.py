@@ -94,8 +94,12 @@ def install_pytorch():
         "--index-url", "https://download.pytorch.org/whl/cu124",
     ]
     print(f"  実行: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
-    print("  ✓ PyTorch CUDA インストール完了")
+    result = subprocess.run(cmd)
+    if result.returncode == 0:
+        print("  ✓ PyTorch CUDA インストール完了")
+    else:
+        print("  ⚠ PyTorch インストール失敗。手動でインストールしてください:")
+        print(f"    {' '.join(cmd)}")
     print()
 
 
@@ -110,8 +114,11 @@ def install_requirements():
 
     cmd = [sys.executable, "-m", "pip", "install", "-r", req_file]
     print(f"  実行: pip install -r requirements.txt")
-    subprocess.run(cmd, check=True)
-    print("  ✓ 依存パッケージインストール完了")
+    result = subprocess.run(cmd)
+    if result.returncode == 0:
+        print("  ✓ 依存パッケージインストール完了")
+    else:
+        print("  ⚠ 一部のパッケージのインストールに失敗しました")
     print()
 
 

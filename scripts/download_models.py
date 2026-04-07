@@ -34,26 +34,48 @@ MODELS_DIR = Path(__file__).parent.parent / "models"
 
 
 def download_file(url: str, filepath: Path, description: str = ""):
-    """下载文件并显示进度"""
-    import httpx
-    from tqdm import tqdm
+    """下载文件并显示进度（使用临时文件防止损坏）"""
+    try:
+        import httpx
+    except ImportError:
+        print("  ⚠ httpx not installed. Install: pip install httpx")
+        print(f"  手動ダウンロード: {url}")
+        return
+
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        tqdm = None
 
     filepath.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = filepath.with_suffix(".downloading")
 
     print(f"\nダウンロード中: {description}")
     print(f"  URL: {url}")
     print(f"  保存先: {filepath}")
 
-    with httpx.stream("GET", url, follow_redirects=True, timeout=300) as response:
-        total = int(response.headers.get("content-length", 0))
-        with open(filepath, "wb") as f, tqdm(
-            total=total, unit="B", unit_scale=True, desc=filepath.name
-        ) as pbar:
-            for chunk in response.iter_bytes(chunk_size=8192):
-                f.write(chunk)
-                pbar.update(len(chunk))
+    try:
+        with httpx.stream("GET", url, follow_redirects=True, timeout=300) as response:
+            total = int(response.headers.get("content-length", 0))
+            if tqdm:
+                pbar = tqdm(total=total, unit="B", unit_scale=True, desc=filepath.name)
+            with open(temp_path, "wb") as f:
+                for chunk in response.iter_bytes(chunk_size=8192):
+                    f.write(chunk)
+                    if tqdm and pbar:
+                        pbar.update(len(chunk))
+            if tqdm and pbar:
+                pbar.close()
 
-    print(f"  ✓ 完了: {filepath.name}")
+        # Rename temp file to final (atomic on same filesystem)
+        temp_path.rename(filepath)
+        print(f"  ✓ 完了: {filepath.name}")
+
+    except Exception as e:
+        # Clean up partial download
+        if temp_path.exists():
+            temp_path.unlink()
+        raise e
 
 
 def main():
