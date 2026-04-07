@@ -1,0 +1,238 @@
+/* YOVUS - 日系極簡テーマ / Japanese Minimalist Theme */
+
+:root {
+    --jp-bg: #FAFAF8;
+    --jp-bg-secondary: #F5F3EF;
+    --jp-bg-card: #FFFFFF;
+    --jp-border: #E8E4DC;
+    --jp-border-focus: #C4A882;
+    --jp-text-primary: #2C2C2C;
+    --jp-text-secondary: #6B6B6B;
+    --jp-text-muted: #9B9B9B;
+    --jp-accent: #D4A574;
+    --jp-accent-hover: #C4956A;
+    --jp-accent-light: #F0E6D8;
+    --jp-success: #7BAE7F;
+    --jp-warning: #D4A04A;
+    --jp-error: #C75B5B;
+    --jp-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+    --jp-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.08);
+    --jp-radius: 8px;
+    --jp-radius-sm: 4px;
+    --jp-font: "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", sans-serif;
+    --jp-font-mono: "JetBrains Mono", "Source Han Code JP", monospace;
+}
+
+/* Base */
+.gradio-container {
+    font-family: var(--jp-font) !important;
+    background: var(--jp-bg) !important;
+    max-width: 1400px !important;
+    margin: 0 auto !important;
+}
+
+/* Header */
+.yovus-header {
+    text-align: center;
+    padding: 24px 0 16px;
+    border-bottom: 1px solid var(--jp-border);
+    margin-bottom: 20px;
+}
+
+.yovus-header h1 {
+    font-size: 28px !important;
+    font-weight: 300 !important;
+    color: var(--jp-text-primary) !important;
+    letter-spacing: 8px !important;
+    margin: 0 !important;
+}
+
+.yovus-header p {
+    font-size: 12px !important;
+    color: var(--jp-text-muted) !important;
+    letter-spacing: 3px !important;
+    margin-top: 6px !important;
+}
+
+/* Tab Navigation */
+.tab-nav {
+    border-bottom: 1px solid var(--jp-border) !important;
+    gap: 0 !important;
+}
+
+.tab-nav button {
+    font-family: var(--jp-font) !important;
+    font-size: 13px !important;
+    font-weight: 400 !important;
+    letter-spacing: 2px !important;
+    color: var(--jp-text-secondary) !important;
+    border: none !important;
+    border-bottom: 2px solid transparent !important;
+    padding: 12px 24px !important;
+    background: transparent !important;
+    transition: all 0.3s ease !important;
+}
+
+.tab-nav button.selected {
+    color: var(--jp-text-primary) !important;
+    border-bottom-color: var(--jp-accent) !important;
+    background: transparent !important;
+}
+
+/* Cards */
+.card-panel {
+    background: var(--jp-bg-card) !important;
+    border: 1px solid var(--jp-border) !important;
+    border-radius: var(--jp-radius) !important;
+    padding: 20px !important;
+    box-shadow: var(--jp-shadow) !important;
+    margin-bottom: 12px !important;
+}
+
+/* Buttons */
+.jp-btn-primary {
+    background: var(--jp-accent) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: var(--jp-radius) !important;
+    padding: 10px 32px !important;
+    font-size: 13px !important;
+    letter-spacing: 2px !important;
+    font-weight: 400 !important;
+    transition: all 0.3s ease !important;
+    cursor: pointer !important;
+}
+
+.jp-btn-primary:hover {
+    background: var(--jp-accent-hover) !important;
+    box-shadow: var(--jp-shadow-hover) !important;
+}
+
+.jp-btn-secondary {
+    background: transparent !important;
+    color: var(--jp-text-secondary) !important;
+    border: 1px solid var(--jp-border) !important;
+    border-radius: var(--jp-radius) !important;
+    padding: 10px 24px !important;
+    font-size: 13px !important;
+    letter-spacing: 1px !important;
+}
+
+/* Progress Bar */
+.jp-progress {
+    height: 3px !important;
+    background: var(--jp-bg-secondary) !important;
+    border-radius: 2px !important;
+    overflow: hidden !important;
+}
+
+.jp-progress-bar {
+    height: 100% !important;
+    background: linear-gradient(90deg, var(--jp-accent), var(--jp-accent-hover)) !important;
+    transition: width 0.5s ease !important;
+}
+
+/* Input Fields */
+input, textarea, select {
+    font-family: var(--jp-font) !important;
+    border: 1px solid var(--jp-border) !important;
+    border-radius: var(--jp-radius-sm) !important;
+    padding: 8px 12px !important;
+    font-size: 13px !important;
+    transition: border-color 0.3s ease !important;
+}
+
+input:focus, textarea:focus, select:focus {
+    border-color: var(--jp-border-focus) !important;
+    outline: none !important;
+    box-shadow: 0 0 0 3px var(--jp-accent-light) !important;
+}
+
+/* Slider */
+input[type="range"] {
+    accent-color: var(--jp-accent) !important;
+}
+
+/* Status Badges */
+.status-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    letter-spacing: 1px;
+}
+
+.status-ready { background: #EBF5EC; color: var(--jp-success); }
+.status-processing { background: #FFF5E0; color: var(--jp-warning); }
+.status-error { background: #FDEAEA; color: var(--jp-error); }
+
+/* Gallery / Image Grid */
+.gallery-item {
+    border-radius: var(--jp-radius) !important;
+    overflow: hidden !important;
+    border: 1px solid var(--jp-border) !important;
+    transition: box-shadow 0.3s ease !important;
+}
+
+.gallery-item:hover {
+    box-shadow: var(--jp-shadow-hover) !important;
+}
+
+/* Log Panel */
+.log-panel {
+    font-family: var(--jp-font-mono) !important;
+    font-size: 11px !important;
+    background: #FAFAF8 !important;
+    border: 1px solid var(--jp-border) !important;
+    border-radius: var(--jp-radius-sm) !important;
+    padding: 12px !important;
+    max-height: 200px !important;
+    overflow-y: auto !important;
+    color: var(--jp-text-secondary) !important;
+}
+
+/* Divider */
+.jp-divider {
+    border: none;
+    border-top: 1px solid var(--jp-border);
+    margin: 16px 0;
+}
+
+/* Footer */
+.yovus-footer {
+    text-align: center;
+    padding: 16px 0;
+    border-top: 1px solid var(--jp-border);
+    margin-top: 20px;
+    font-size: 11px;
+    color: var(--jp-text-muted);
+    letter-spacing: 2px;
+}
+
+/* Animations */
+@keyframes jp-fade-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.jp-animate {
+    animation: jp-fade-in 0.4s ease forwards;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+    width: 4px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--jp-bg);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--jp-border);
+    border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--jp-text-muted);
+}
