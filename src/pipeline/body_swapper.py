@@ -278,7 +278,8 @@ class LoRATrainer:
             )
             if callback:
                 callback("オプティマイザ: AdamW 8bit (VRAM節約)")
-        except ImportError:
+        except Exception:
+            # bitsandbytes can fail with RuntimeError/OSError on Windows (DLL issues)
             optimizer = torch.optim.AdamW(trainable_params, lr=lr, weight_decay=1e-2)
             if callback:
                 callback("オプティマイザ: AdamW (標準)")
@@ -482,18 +483,18 @@ class BodyGenerator:
             self._pipe.scheduler.config
         )
 
-        # 8GB VRAM optimization
+        # Load LoRA BEFORE cpu_offload (offload hooks can interfere with weight injection)
+        if lora_path and Path(lora_path).exists():
+            logger.info(f"Loading LoRA weights: {lora_path}")
+            self._pipe.load_lora_weights(str(lora_path))
+            logger.info("LoRA weights loaded")
+
+        # 8GB VRAM optimization (must be after LoRA loading)
         self._pipe.enable_model_cpu_offload()
         try:
             self._pipe.enable_xformers_memory_efficient_attention()
         except Exception:
             logger.debug("xformers not available")
-
-        # Load LoRA if available
-        if lora_path and Path(lora_path).exists():
-            logger.info(f"Loading LoRA weights: {lora_path}")
-            self._pipe.load_lora_weights(str(lora_path))
-            logger.info("LoRA weights loaded")
 
         self._initialized = True
         logger.info("Body generation pipeline ready")
