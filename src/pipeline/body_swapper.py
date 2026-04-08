@@ -78,8 +78,8 @@ class LoRATrainer:
                 new_w, new_h = int(w * scale), int(h * scale)
                 img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
 
-                # Pad to square
-                canvas = np.zeros((target_size, target_size, 3), dtype=np.uint8)
+                # Pad to square (gray background to avoid training artifacts)
+                canvas = np.full((target_size, target_size, 3), 128, dtype=np.uint8)
                 y_off = (target_size - new_h) // 2
                 x_off = (target_size - new_w) // 2
                 canvas[y_off:y_off + new_h, x_off:x_off + new_w] = img
@@ -248,7 +248,7 @@ class LoRATrainer:
         # Apply LoRA
         lora_config = LoraConfig(
             r=rank,
-            lora_alpha=rank // 2,
+            lora_alpha=rank,  # scaling = alpha/r = 1.0 (standard)
             target_modules=["to_k", "to_q", "to_v", "to_out.0"],
             lora_dropout=0.05,
         )
@@ -262,18 +262,22 @@ class LoRATrainer:
         # Noise scheduler
         scheduler = DDPMScheduler.from_pretrained(base_model, subfolder="scheduler")
 
-        # Optimizer (8-bit Adam for VRAM saving)
+        # Optimizer - ONLY trainable params (saves ~860MB VRAM)
+        trainable_params = [p for p in unet.parameters() if p.requires_grad]
         try:
             import bitsandbytes as bnb
             optimizer = bnb.optim.AdamW8bit(
-                unet.parameters(), lr=lr, weight_decay=1e-2,
+                trainable_params, lr=lr, weight_decay=1e-2,
             )
             if callback:
                 callback("オプティマイザ: AdamW 8bit (VRAM節約)")
         except ImportError:
-            optimizer = torch.optim.AdamW(unet.parameters(), lr=lr, weight_decay=1e-2)
+            optimizer = torch.optim.AdamW(trainable_params, lr=lr, weight_decay=1e-2)
             if callback:
                 callback("オプティマイザ: AdamW (標準)")
+
+        # Mixed precision scaler for stable fp16 training
+        scaler = torch.cuda.amp.GradScaler()
 
         # 4) Training loop
         unet.train()
@@ -284,8 +288,8 @@ class LoRATrainer:
             callback(f"学習開始: {steps} steps...")
 
         for step in range(steps):
-            # Random latent from cache
-            idx = step % num_latents
+            # Random latent from cache (random sampling, not sequential)
+            idx = torch.randint(0, num_latents, (1,)).item()
             latent = latent_cache[idx].to(device, dtype=dtype)
 
             # Random noise
@@ -295,34 +299,37 @@ class LoRATrainer:
             # Add noise
             noisy_latent = scheduler.add_noise(latent, noise, timestep)
 
-            # Predict noise
-            noise_pred = unet(noisy_latent, timestep, text_embeds_expanded).sample
+            # Forward pass with mixed precision
+            with torch.cuda.amp.autocast():
+                noise_pred = unet(
+                    noisy_latent, timestep,
+                    encoder_hidden_states=text_embeds_expanded,
+                ).sample
+                loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
 
-            # MSE loss
-            loss = torch.nn.functional.mse_loss(noise_pred, noise)
-
+            # Backward pass with gradient scaling
             optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(unet.parameters(), 1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             if callback and (step + 1) % 50 == 0:
                 callback(f"Step {step+1}/{steps} | Loss: {loss.item():.4f}")
 
-            # Save checkpoint
+            # Save checkpoint in diffusers-compatible format
             if (step + 1) % max(1, steps // 3) == 0:
-                ckpt_dir = output_dir / f"checkpoint-{step+1}"
-                unet.save_pretrained(str(ckpt_dir))
+                self._save_lora_diffusers(unet, output_dir / f"checkpoint-{step+1}")
 
-        # 5) Save final weights
+        # 5) Save final weights in diffusers-compatible format
         if callback:
             callback("LoRA 重み保存中...")
 
-        unet.save_pretrained(str(output_dir))
+        self._save_lora_diffusers(unet, output_dir)
 
-        # Also save in diffusers-compatible format
         unet.eval()
-        del optimizer, latent_cache
+        del optimizer, latent_cache, scaler
         torch.cuda.empty_cache()
         gc.collect()
 
@@ -330,6 +337,29 @@ class LoRATrainer:
             callback(f"LoRA 学習完了! 保存先: {output_dir}")
 
         return output_dir
+
+    @staticmethod
+    def _save_lora_diffusers(peft_unet, save_dir: Path):
+        """Save LoRA weights in diffusers-compatible format"""
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            from peft import get_peft_model_state_dict
+            from safetensors.torch import save_file
+
+            state_dict = get_peft_model_state_dict(peft_unet)
+            # Convert PEFT keys to diffusers LoRA format
+            diffusers_dict = {}
+            for key, val in state_dict.items():
+                new_key = key.replace("base_model.model.", "")
+                diffusers_dict[new_key] = val.cpu()
+
+            save_file(diffusers_dict, str(save_dir / "pytorch_lora_weights.safetensors"))
+            logger.info(f"LoRA weights saved (diffusers format): {save_dir}")
+        except Exception as e:
+            logger.warning(f"Diffusers format save failed: {e}, saving PEFT format")
+            peft_unet.save_pretrained(str(save_dir))
 
 
 class PoseExtractor:
@@ -461,6 +491,10 @@ class BodyGenerator:
         import torch
         from PIL import Image
         import cv2
+
+        # Ensure dimensions are divisible by 8 (required by VAE)
+        width = (width // 8) * 8
+        height = (height // 8) * 8
 
         # Convert pose to PIL
         pose_pil = Image.fromarray(cv2.cvtColor(pose_image, cv2.COLOR_BGR2RGB))

@@ -385,17 +385,28 @@ class YovusApp:
             gen_dir = config.paths.temp_dir / "generated" / job.job_id
             gen_dir.mkdir(parents=True, exist_ok=True)
 
-            # Find LoRA weights
+            # Find LoRA weights (diffusers format: pytorch_lora_weights.safetensors)
             lora_path = config.paths.lora_dir / "lora_weights"
-            if not lora_path.exists():
-                # Check for any lora_weights dir
-                for p in config.paths.lora_dir.iterdir():
-                    if p.is_dir() and (p / "adapter_config.json").exists():
-                        lora_path = p
-                        break
+            if not lora_path.exists() or not (lora_path / "pytorch_lora_weights.safetensors").exists():
+                lora_path = None
+                # Search for any dir with LoRA weights
+                if config.paths.lora_dir.exists():
+                    for p in config.paths.lora_dir.iterdir():
+                        if p.is_dir():
+                            if (p / "pytorch_lora_weights.safetensors").exists():
+                                lora_path = p
+                                break
+                            if (p / "adapter_config.json").exists():
+                                lora_path = p
+                                break
 
             bg = BodyGenerator(device=config.gpu.device)
-            bg.initialize(lora_path=lora_path if lora_path.exists() else None)
+            has_lora = lora_path is not None and Path(lora_path).exists()
+            bg.initialize(lora_path=lora_path if has_lora else None)
+            if has_lora:
+                self._add_log(f"LoRA loaded: {lora_path}")
+            else:
+                self._add_log("WARNING: LoRA not found, generating without identity preservation")
 
             # Get original frame size for proper generation
             frames_dir = Path(job.shared_data.get("frames_dir", ""))
