@@ -61,7 +61,7 @@ class VideoProcessor:
 
         info.file_size_mb = video_path.stat().st_size / (1024 * 1024)
 
-        cap = cv2.VideoCapture(str(video_path))
+        cap = self._open_video(video_path)
         if not cap.isOpened():
             raise ValueError(f"映像ファイルを開けません: {video_path}")
 
@@ -92,13 +92,17 @@ class VideoProcessor:
     ) -> Path:
         """提取视频帧到目录"""
         import cv2
+        import hashlib
 
         video_path = Path(video_path)
         if output_dir is None:
-            output_dir = self.temp_dir / "frames" / video_path.stem
+            # Use hash-based dir name to avoid Unicode path issues on Windows
+            safe_name = hashlib.md5(str(video_path).encode()).hexdigest()[:12]
+            output_dir = self.temp_dir / "frames" / safe_name
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        cap = cv2.VideoCapture(str(video_path))
+        # Unicode-safe video open for Windows
+        cap = self._open_video(video_path)
         if not cap.isOpened():
             raise ValueError(f"映像を開けません: {video_path}")
 
@@ -128,6 +132,31 @@ class VideoProcessor:
         cap.release()
         logger.info(f"Extracted {saved} frames to {output_dir}")
         return output_dir
+
+    @staticmethod
+    def _open_video(video_path: Path):
+        """Open video with Unicode path support on Windows"""
+        import cv2
+        import platform
+
+        path_str = str(video_path)
+        cap = cv2.VideoCapture(path_str)
+
+        # If standard open fails and path has non-ASCII chars, try Windows workaround
+        if not cap.isOpened() and platform.system() == "Windows":
+            try:
+                import numpy as np
+                # Read raw bytes and create temp file with ASCII name
+                import shutil
+                import tempfile
+                tmp = Path(tempfile.gettempdir()) / f"yovus_video{video_path.suffix}"
+                shutil.copy2(video_path, tmp)
+                cap = cv2.VideoCapture(str(tmp))
+                logger.info(f"Opened video via temp copy (Unicode path workaround)")
+            except Exception as e:
+                logger.warning(f"Unicode path workaround failed: {e}")
+
+        return cap
 
     def iterate_frames(self, video_path: Path) -> Generator:
         """逐帧迭代器（节省内存）"""
