@@ -269,32 +269,296 @@ class YovusApp:
             return {}
 
         def pose_estimate(job, results):
-            self._add_log("Pose estimation (placeholder)")
-            return {}
+            """DWPose 逐帧姿势提取"""
+            import cv2
+            from src.pipeline.body_swapper import PoseExtractor
+
+            frames_dir = Path(job.shared_data.get("frames_dir", ""))
+            frame_files = sorted(frames_dir.glob("*.png"))
+            if not frame_files:
+                raise ValueError("No frames for pose estimation")
+
+            pose_dir = config.paths.temp_dir / "poses" / job.job_id
+            pose_dir.mkdir(parents=True, exist_ok=True)
+
+            pe = PoseExtractor(device=config.gpu.device)
+            pe.initialize()
+
+            for i, fp in enumerate(frame_files):
+                frame = cv2.imread(str(fp))
+                if frame is None:
+                    continue
+                pose = pe.extract_pose(frame)
+                if pose is not None:
+                    cv2.imwrite(str(pose_dir / fp.name), pose)
+
+                if (i + 1) % 30 == 0:
+                    self._add_log(f"姿勢抽出: {i+1}/{len(frame_files)}")
+
+            pe.release()
+            job.shared_data["poses_dir"] = str(pose_dir)
+            self._add_log(f"姿勢抽出完了: {len(list(pose_dir.glob('*.png')))} フレーム")
+            return {"poses_dir": str(pose_dir)}
 
         def body_segment(job, results):
-            self._add_log("Body segmentation (placeholder)")
-            return {}
+            """人物分割 - 每帧生成人物mask"""
+            import cv2
+            from src.pipeline.segmentation import PersonSegmenter
 
-        def body_generate(job, results):
-            self._add_log("Body generation (placeholder)")
-            return {}
+            frames_dir = Path(job.shared_data.get("frames_dir", ""))
+            frame_files = sorted(frames_dir.glob("*.png"))
+            if not frame_files:
+                raise ValueError("No frames for segmentation")
 
-        def composite(job, results):
-            self._add_log("Compositing (placeholder)")
-            return {}
+            mask_dir = config.paths.temp_dir / "masks" / job.job_id
+            mask_dir.mkdir(parents=True, exist_ok=True)
+
+            seg = PersonSegmenter(device=config.gpu.device)
+            seg.initialize()
+
+            for i, fp in enumerate(frame_files):
+                frame = cv2.imread(str(fp))
+                if frame is None:
+                    continue
+                mask = seg.segment(frame)
+
+                # 膨胀mask确保完全覆盖人物
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (20, 20))
+                mask = cv2.dilate(mask, kernel, iterations=1)
+                mask = cv2.GaussianBlur(mask, (11, 11), 5)
+
+                cv2.imwrite(str(mask_dir / fp.name), mask)
+
+                if (i + 1) % 30 == 0:
+                    self._add_log(f"人物分割: {i+1}/{len(frame_files)}")
+
+            seg.release()
+            job.shared_data["masks_dir"] = str(mask_dir)
+            self._add_log(f"人物分割完了: {len(list(mask_dir.glob('*.png')))} フレーム")
+            return {"masks_dir": str(mask_dir)}
 
         def inpaint_mask(job, results):
-            self._add_log("Inpaint mask generation (placeholder)")
-            return {}
+            """背景修復 - 人物を除去して背景を修復"""
+            import cv2
+            from src.pipeline.video_inpainter import VideoInpainter
+
+            frames_dir = Path(job.shared_data.get("frames_dir", ""))
+            masks_dir = Path(job.shared_data.get("masks_dir", ""))
+            frame_files = sorted(frames_dir.glob("*.png"))
+
+            clean_dir = config.paths.temp_dir / "clean_bg" / job.job_id
+            clean_dir.mkdir(parents=True, exist_ok=True)
+
+            inpainter = VideoInpainter(device=config.gpu.device, method="simple")
+            inpainter.initialize()
+
+            for i, fp in enumerate(frame_files):
+                frame = cv2.imread(str(fp))
+                mask_path = masks_dir / fp.name
+                mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE) if mask_path.exists() else None
+
+                if frame is not None and mask is not None:
+                    clean = inpainter.inpaint_frame(frame, mask)
+                    cv2.imwrite(str(clean_dir / fp.name), clean)
+                elif frame is not None:
+                    cv2.imwrite(str(clean_dir / fp.name), frame)
+
+                if (i + 1) % 30 == 0:
+                    self._add_log(f"背景修復: {i+1}/{len(frame_files)}")
+
+            inpainter.release()
+            job.shared_data["clean_bg_dir"] = str(clean_dir)
+            self._add_log(f"背景修復完了")
+            return {"clean_bg_dir": str(clean_dir)}
+
+        def body_generate(job, results):
+            """ControlNet + LoRA 全身生成"""
+            import cv2
+            from src.pipeline.body_swapper import BodyGenerator
+
+            poses_dir = Path(job.shared_data.get("poses_dir", ""))
+            pose_files = sorted(poses_dir.glob("*.png"))
+            if not pose_files:
+                self._add_log("WARNING: No pose files, skipping body generation")
+                return {}
+
+            gen_dir = config.paths.temp_dir / "generated" / job.job_id
+            gen_dir.mkdir(parents=True, exist_ok=True)
+
+            # Find LoRA weights
+            lora_path = config.paths.lora_dir / "lora_weights"
+            if not lora_path.exists():
+                # Check for any lora_weights dir
+                for p in config.paths.lora_dir.iterdir():
+                    if p.is_dir() and (p / "adapter_config.json").exists():
+                        lora_path = p
+                        break
+
+            bg = BodyGenerator(device=config.gpu.device)
+            bg.initialize(lora_path=lora_path if lora_path.exists() else None)
+
+            # Get original frame size for proper generation
+            frames_dir = Path(job.shared_data.get("frames_dir", ""))
+            sample_frame = cv2.imread(str(sorted(frames_dir.glob("*.png"))[0]))
+            orig_h, orig_w = sample_frame.shape[:2]
+
+            # Generation size (must be divisible by 8, fit in VRAM)
+            gen_w = min(orig_w, 768)
+            gen_h = min(orig_h, 768)
+            gen_w = gen_w - (gen_w % 8)
+            gen_h = gen_h - (gen_h % 8)
+
+            self._add_log(f"生成サイズ: {gen_w}x{gen_h} (元: {orig_w}x{orig_h})")
+
+            for i, fp in enumerate(pose_files):
+                pose = cv2.imread(str(fp))
+                if pose is None:
+                    continue
+
+                generated = bg.generate(
+                    pose,
+                    prompt="a photo of sks person, full body, high quality, detailed, professional photography, natural lighting",
+                    negative_prompt="low quality, blurry, deformed, extra limbs, bad anatomy, disfigured, ugly, text, watermark",
+                    num_inference_steps=30,
+                    controlnet_conditioning_scale=0.85,
+                    guidance_scale=7.5,
+                    width=gen_w,
+                    height=gen_h,
+                    seed=42 + i,  # 一定のシード + フレーム番号 で一貫性
+                )
+
+                # Resize back to original
+                if generated.shape[:2] != (orig_h, orig_w):
+                    generated = cv2.resize(generated, (orig_w, orig_h), interpolation=cv2.INTER_LANCZOS4)
+
+                cv2.imwrite(str(gen_dir / fp.name), generated)
+
+                if (i + 1) % 10 == 0:
+                    self._add_log(f"全身生成: {i+1}/{len(pose_files)}")
+
+            bg.release()
+            job.shared_data["generated_dir"] = str(gen_dir)
+            self._add_log(f"全身生成完了: {len(list(gen_dir.glob('*.png')))} フレーム")
+            return {"generated_dir": str(gen_dir)}
+
+        def composite(job, results):
+            """合成 - 生成された人物を修復背景に合成"""
+            import cv2
+            from src.pipeline.post_processor import Compositor
+
+            clean_bg_dir = Path(job.shared_data.get("clean_bg_dir", ""))
+            generated_dir = Path(job.shared_data.get("generated_dir", ""))
+            masks_dir = Path(job.shared_data.get("masks_dir", ""))
+            frames_dir = Path(job.shared_data.get("frames_dir", ""))
+
+            out_dir = config.paths.temp_dir / "composited" / job.job_id
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            frame_files = sorted(frames_dir.glob("*.png"))
+
+            for i, fp in enumerate(frame_files):
+                name = fp.name
+                bg_path = clean_bg_dir / name
+                gen_path = generated_dir / name
+                mask_path = masks_dir / name
+
+                # If generated frame exists → composite
+                if gen_path.exists() and bg_path.exists() and mask_path.exists():
+                    bg = cv2.imread(str(bg_path))
+                    gen = cv2.imread(str(gen_path))
+                    mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+
+                    if bg is not None and gen is not None and mask is not None:
+                        # Resize generated to match background
+                        if gen.shape[:2] != bg.shape[:2]:
+                            gen = cv2.resize(gen, (bg.shape[1], bg.shape[0]))
+                        if mask.shape[:2] != bg.shape[:2]:
+                            mask = cv2.resize(mask, (bg.shape[1], bg.shape[0]))
+
+                        # Poisson blend for natural edges
+                        result = Compositor.poisson_blend(gen, bg, mask)
+                        cv2.imwrite(str(out_dir / name), result)
+                    else:
+                        # Fallback to original frame
+                        import shutil
+                        shutil.copy2(fp, out_dir / name)
+                else:
+                    # No generation for this frame, use swapped or original
+                    swapped_path = Path(job.shared_data.get("swapped_dir", "")) / name
+                    import shutil
+                    if swapped_path.exists():
+                        shutil.copy2(swapped_path, out_dir / name)
+                    else:
+                        shutil.copy2(fp, out_dir / name)
+
+                if (i + 1) % 30 == 0:
+                    self._add_log(f"合成: {i+1}/{len(frame_files)}")
+
+            job.shared_data["swapped_dir"] = str(out_dir)  # Override for downstream
+            self._add_log(f"合成完了")
+            return {"composited_dir": str(out_dir)}
 
         def temporal_smooth(job, results):
-            self._add_log("Temporal smoothing (placeholder)")
+            """時間軸平滑化 - フレーム間の一貫性を保つ"""
+            import cv2
+            from src.pipeline.post_processor import TemporalSmoother
+
+            swapped_dir = Path(job.shared_data.get("swapped_dir", ""))
+            masks_dir = Path(job.shared_data.get("masks_dir", ""))
+            frame_files = sorted(swapped_dir.glob("*.png"))
+
+            if len(frame_files) < 3:
+                return {}
+
+            smoother = TemporalSmoother(window_size=5, weight=0.6)
+
+            for i, fp in enumerate(frame_files):
+                frame = cv2.imread(str(fp))
+                if frame is None:
+                    continue
+
+                mask_path = masks_dir / fp.name
+                mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE) if mask_path.exists() else None
+
+                smoothed = smoother.smooth(frame, mask=mask)
+                cv2.imwrite(str(fp), smoothed)
+
+                if (i + 1) % 60 == 0:
+                    self._add_log(f"平滑化: {i+1}/{len(frame_files)}")
+
+            smoother.reset()
+            self._add_log("時間軸平滑化完了")
             return {}
 
         def lora_train(job, results):
-            self._add_log("LoRA training (placeholder)")
-            return {}
+            """本地 LoRA 训练"""
+            from src.pipeline.body_swapper import LoRATrainer
+
+            trainer = LoRATrainer(device=config.gpu.device)
+
+            # Prepare data
+            self._add_log("学習データ準備中...")
+            prep = trainer.prepare_training_data(
+                job.reference_photos_dir,
+                config.paths.temp_dir / "lora_data",
+                target_size=512,
+                progress_callback=lambda m: self._add_log(m),
+            )
+            self._add_log(f"データ準備完了: {prep['count']} 枚")
+
+            # Train
+            output = trainer.train(
+                Path(prep["path"]),
+                config.paths.lora_dir,
+                steps=1500,
+                rank=16,
+                lr=1e-4,
+                callback=lambda m: self._add_log(m),
+            )
+
+            job.shared_data["lora_path"] = str(output)
+            self._add_log(f"LoRA 学習完了: {output}")
+            return {"lora_path": str(output)}
 
         def video_encode(job, results):
             swapped_dir = Path(job.shared_data.get("swapped_dir", job.shared_data.get("frames_dir", "")))
@@ -381,18 +645,23 @@ class YovusApp:
         try:
             from src.pipeline.body_swapper import LoRATrainer
             trainer = LoRATrainer(device=config.gpu.device)
+
+            self._add_log("学習データ準備中...")
             prep = trainer.prepare_training_data(
                 Path(photos_dir), config.paths.temp_dir / "lora_data",
+                target_size=512,
                 progress_callback=lambda m: self._add_log(m),
             )
-            self._add_log(f"Prepared {prep['count']} images")
+            self._add_log(f"データ準備完了: {prep['count']} 枚")
+
             output = trainer.train(
                 Path(prep["path"]), config.paths.lora_dir,
                 steps=int(steps), rank=int(rank), lr=float(lr),
                 callback=lambda m: self._add_log(m),
             )
-            return f"LoRA output: {output}"
+            return f"LoRA 学習完了!\n保存先: {output}\n\nProcessing タブで 'Full Replace (LoRA)' または 'Inpaint Replace' モードで使用できます。"
         except Exception as e:
+            self._add_log(f"LoRA error: {e}")
             return f"Error: {e}"
 
     # ── Build UI ──
