@@ -46,13 +46,18 @@ class FaceSwapper:
         self._model_path = models_dir
         model_file = models_dir / "inswapper_128.onnx"
 
+        # Check for missing or corrupt model file
+        if model_file.exists() and model_file.stat().st_size < 1_000_000:
+            logger.warning(f"Model file corrupt (too small: {model_file.stat().st_size} bytes), removing")
+            model_file.unlink()
+
         if not model_file.exists():
             logger.warning(f"Model not found: {model_file}")
             self._download_model(models_dir)
             if not model_file.exists():
                 raise FileNotFoundError(
                     f"inswapper_128.onnx が見つかりません。\n"
-                    f"手動ダウンロード: https://huggingface.co/deepinsight/inswapper/resolve/main/inswapper_128.onnx\n"
+                    f"手動ダウンロード: https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/inswapper_128.onnx\n"
                     f"保存先: {model_file}"
                 )
 
@@ -235,22 +240,51 @@ class FaceSwapper:
             return result
 
     def _download_model(self, models_dir: Path):
-        """尝试自动下载模型"""
+        """尝试自动下载模型 (多源)"""
         models_dir.mkdir(parents=True, exist_ok=True)
         model_file = models_dir / "inswapper_128.onnx"
-        try:
-            import httpx
-            url = "https://huggingface.co/deepinsight/inswapper/resolve/main/inswapper_128.onnx"
-            logger.info(f"Downloading inswapper_128.onnx ...")
-            with httpx.stream("GET", url, follow_redirects=True, timeout=300) as resp:
-                with open(model_file, "wb") as f:
-                    for chunk in resp.iter_bytes(8192):
-                        f.write(chunk)
-            logger.info("Download complete.")
-        except Exception as e:
-            logger.warning(f"Auto-download failed: {e}")
-            logger.info(f"手動ダウンロード: https://huggingface.co/deepinsight/inswapper/resolve/main/inswapper_128.onnx")
-            logger.info(f"保存先: {model_file}")
+        temp_file = models_dir / "inswapper_128.onnx.downloading"
+
+        # Multiple download sources (HuggingFace gated → try alternatives)
+        urls = [
+            "https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/inswapper_128.onnx",
+            "https://huggingface.co/ezioruan/inswapper_128.onnx/resolve/main/inswapper_128.onnx",
+            "https://huggingface.co/deepinsight/inswapper/resolve/main/inswapper_128.onnx",
+        ]
+
+        for url in urls:
+            try:
+                import httpx
+                logger.info(f"Downloading inswapper_128.onnx from {url.split('/')[2]} ...")
+                with httpx.stream("GET", url, follow_redirects=True, timeout=600) as resp:
+                    if resp.status_code != 200:
+                        logger.warning(f"HTTP {resp.status_code} from {url.split('/')[2]}")
+                        continue
+                    with open(temp_file, "wb") as f:
+                        for chunk in resp.iter_bytes(8192):
+                            f.write(chunk)
+
+                # Verify file size (real model is ~500MB, error pages are tiny)
+                file_size = temp_file.stat().st_size
+                if file_size < 1_000_000:  # Less than 1MB = not a real model
+                    logger.warning(f"Downloaded file too small ({file_size} bytes), skipping")
+                    temp_file.unlink(missing_ok=True)
+                    continue
+
+                temp_file.rename(model_file)
+                logger.info(f"Download complete ({file_size // (1024*1024)}MB)")
+                return
+
+            except Exception as e:
+                logger.warning(f"Download failed from {url.split('/')[2]}: {e}")
+                temp_file.unlink(missing_ok=True)
+
+        logger.error("All download sources failed.")
+        logger.info(
+            f"手動ダウンロード:\n"
+            f"  URL: https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/inswapper_128.onnx\n"
+            f"  保存先: {model_file}"
+        )
 
     def _get_providers(self) -> list:
         if self.device == "cuda":

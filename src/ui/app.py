@@ -177,6 +177,8 @@ class YovusApp:
 
         def face_swap(job, results):
             import cv2
+            import shutil
+
             frames_dir = Path(job.shared_data.get("frames_dir", ""))
             if not frames_dir.exists():
                 raise ValueError("Frames not extracted")
@@ -187,8 +189,14 @@ class YovusApp:
 
             source_face = ref["face_data"]
             frame_files = sorted(frames_dir.glob("*.png"))
+            if not frame_files:
+                raise ValueError(f"No frame files found in {frames_dir}")
+
             out_dir = config.paths.temp_dir / "swapped" / job.job_id
             out_dir.mkdir(parents=True, exist_ok=True)
+
+            self._add_log(f"Processing {len(frame_files)} frames...")
+            swapped_count = 0
 
             try:
                 from src.pipeline.face_swapper import FaceSwapper
@@ -198,27 +206,45 @@ class YovusApp:
                 for i, fp in enumerate(frame_files):
                     frame = cv2.imread(str(fp))
                     if frame is None:
+                        shutil.copy2(fp, out_dir / fp.name)
                         continue
-                    faces = fd.detect(frame, max_faces=5)
-                    if faces:
-                        if fs._use_native and source_face._raw and faces[0]._raw:
-                            frame = fs._swap_native(source_face._raw, frame, faces[min(int(face_idx), len(faces)-1)]._raw)
-                        else:
-                            frame = fs.swap_video_frame(source_face, frame, faces, int(face_idx))
+                    try:
+                        faces = fd.detect(frame, max_faces=5)
+                        if faces:
+                            tidx = min(int(face_idx), len(faces) - 1)
+                            if fs._use_native and source_face._raw and faces[tidx]._raw:
+                                frame = fs._swap_native(source_face._raw, frame, faces[tidx]._raw)
+                            else:
+                                frame = fs.swap_video_frame(source_face, frame, faces, int(face_idx))
+                            swapped_count += 1
+                    except Exception as frame_err:
+                        logger.debug(f"Frame {i} swap error: {frame_err}")
+
                     cv2.imwrite(str(out_dir / fp.name), frame)
 
-                    if (i+1) % 30 == 0:
-                        self._add_log(f"Face swap: {i+1}/{len(frame_files)}")
+                    if (i + 1) % 30 == 0:
+                        self._add_log(f"Face swap: {i+1}/{len(frame_files)} ({swapped_count} swapped)")
 
                 fs.release()
             except Exception as e:
-                self._add_log(f"Face swap module error: {e}, copying original frames")
-                import shutil
+                self._add_log(f"Face swap init error: {e}")
+                self._add_log("Copying original frames as fallback...")
+                for fp in frame_files:
+                    dst = out_dir / fp.name
+                    if not dst.exists():
+                        shutil.copy2(fp, dst)
+
+            # Safety check: ensure output dir is not empty
+            output_count = len(list(out_dir.glob("*.png")))
+            if output_count == 0:
+                self._add_log("WARNING: No output frames, copying originals")
                 for fp in frame_files:
                     shutil.copy2(fp, out_dir / fp.name)
+                output_count = len(frame_files)
 
             job.shared_data["swapped_dir"] = str(out_dir)
-            return {"processed": len(frame_files)}
+            self._add_log(f"Face swap done: {swapped_count}/{output_count} faces replaced")
+            return {"processed": output_count, "swapped": swapped_count}
 
         def face_enhance(job, results):
             swapped_dir = Path(job.shared_data.get("swapped_dir", ""))

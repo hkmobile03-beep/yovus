@@ -8,7 +8,7 @@ from pathlib import Path
 # Model registry
 MODELS = {
     "inswapper_128": {
-        "url": "https://huggingface.co/deepinsight/inswapper/resolve/main/inswapper_128.onnx",
+        "url": "https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/inswapper_128.onnx",
         "filename": "inswapper_128.onnx",
         "size": "500MB",
         "required": True,
@@ -55,7 +55,9 @@ def download_file(url: str, filepath: Path, description: str = ""):
     print(f"  保存先: {filepath}")
 
     try:
-        with httpx.stream("GET", url, follow_redirects=True, timeout=300) as response:
+        with httpx.stream("GET", url, follow_redirects=True, timeout=600) as response:
+            if response.status_code != 200:
+                raise RuntimeError(f"HTTP {response.status_code}")
             total = int(response.headers.get("content-length", 0))
             if tqdm:
                 pbar = tqdm(total=total, unit="B", unit_scale=True, desc=filepath.name)
@@ -66,6 +68,11 @@ def download_file(url: str, filepath: Path, description: str = ""):
                         pbar.update(len(chunk))
             if tqdm and pbar:
                 pbar.close()
+
+        # Verify file is not too small (error pages)
+        if temp_path.stat().st_size < 1_000_000:
+            temp_path.unlink()
+            raise RuntimeError(f"Downloaded file too small, likely an error page")
 
         # Rename temp file to final (atomic on same filesystem)
         temp_path.rename(filepath)
@@ -93,8 +100,13 @@ def main():
 
         filepath = MODELS_DIR / info["filename"]
         if filepath.exists():
-            print(f"\n✓ {name}: インストール済み ({info['filename']})")
-            continue
+            # Check for corrupt files (e.g. saved error pages)
+            if filepath.stat().st_size < 1_000_000:
+                print(f"\n⚠ {name}: ファイル破損 (サイズ異常)。再ダウンロードします。")
+                filepath.unlink()
+            else:
+                print(f"\n✓ {name}: インストール済み ({info['filename']})")
+                continue
 
         try:
             download_file(info["url"], filepath, info["description"])
