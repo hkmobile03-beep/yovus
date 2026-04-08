@@ -53,7 +53,6 @@ def main():
         server_name="0.0.0.0",
         server_port=config.server_port,
         share=config.share,
-        show_api=False,
     )
 
 
