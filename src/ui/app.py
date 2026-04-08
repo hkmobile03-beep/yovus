@@ -452,8 +452,9 @@ class YovusApp:
 
                 self._add_log(f"生成サイズ: {gen_w}x{gen_h} (元: {orig_w}x{orig_h})")
 
-                # Use fixed seed base for temporal consistency
-                seed_base = 42
+                # Use SAME seed for all frames to ensure temporal consistency
+                # (different seeds cause flickering/inconsistent appearance)
+                fixed_seed = 42
                 for i, fp in enumerate(pose_files):
                     pose = cv2.imread(str(fp))
                     if pose is None:
@@ -468,7 +469,7 @@ class YovusApp:
                         guidance_scale=config.body_swap.guidance_scale,
                         width=gen_w,
                         height=gen_h,
-                        seed=seed_base + i,
+                        seed=fixed_seed,
                     )
 
                     if generated.shape[:2] != (orig_h, orig_w):
@@ -574,34 +575,55 @@ class YovusApp:
             return {}
 
         def lora_train(job, results):
-            """本地 LoRA 训练"""
+            """本地 LoRA 训练 (skip if weights already exist)"""
             from src.pipeline.body_swapper import LoRATrainer
+
+            # Check if LoRA weights already exist - skip retraining
+            existing_lora = config.paths.lora_dir / "lora_weights"
+            if existing_lora.exists() and any(existing_lora.glob("*.safetensors")):
+                self._add_log(f"既存のLoRA重みを検出: {existing_lora} — 再学習をスキップします")
+                job.shared_data["lora_path"] = str(existing_lora)
+                return {"lora_path": str(existing_lora)}
 
             trainer = LoRATrainer(device=config.gpu.device)
 
-            # Prepare data
-            self._add_log("学習データ準備中...")
-            prep = trainer.prepare_training_data(
-                job.reference_photos_dir,
-                config.paths.temp_dir / "lora_data",
-                target_size=512,
-                progress_callback=lambda m: self._add_log(m),
-            )
-            self._add_log(f"データ準備完了: {prep['count']} 枚")
+            # Release InsightFace fd to free VRAM before training
+            try:
+                fd.release()
+                self._add_log("FaceDetector VRAM解放 (学習用)")
+            except Exception:
+                pass
 
-            # Train using config values
-            output = trainer.train(
-                Path(prep["path"]),
-                config.paths.lora_dir,
-                steps=config.body_swap.lora_training_steps,
-                rank=config.body_swap.lora_rank,
-                lr=config.body_swap.lora_lr,
-                callback=lambda m: self._add_log(m),
-            )
+            try:
+                # Prepare data
+                self._add_log("学習データ準備中...")
+                prep = trainer.prepare_training_data(
+                    job.reference_photos_dir,
+                    config.paths.temp_dir / "lora_data",
+                    target_size=512,
+                    progress_callback=lambda m: self._add_log(m),
+                )
+                self._add_log(f"データ準備完了: {prep['count']} 枚")
 
-            job.shared_data["lora_path"] = str(output)
-            self._add_log(f"LoRA 学習完了: {output}")
-            return {"lora_path": str(output)}
+                # Train using config values
+                output = trainer.train(
+                    Path(prep["path"]),
+                    config.paths.lora_dir,
+                    steps=config.body_swap.lora_training_steps,
+                    rank=config.body_swap.lora_rank,
+                    lr=config.body_swap.lora_lr,
+                    callback=lambda m: self._add_log(m),
+                )
+
+                job.shared_data["lora_path"] = str(output)
+                self._add_log(f"LoRA 学習完了: {output}")
+                return {"lora_path": str(output)}
+            finally:
+                # Re-initialize InsightFace for later face_swap stage
+                try:
+                    fd.initialize()
+                except Exception:
+                    pass
 
         def video_encode(job, results):
             swapped_dir = Path(job.shared_data.get("swapped_dir", job.shared_data.get("frames_dir", "")))

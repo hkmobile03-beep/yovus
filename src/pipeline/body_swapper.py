@@ -214,6 +214,13 @@ class LoRATrainer:
 
         # Limit to reasonable number for 8GB VRAM training
         max_images = min(len(image_files), 200)
+        if len(image_files) > max_images:
+            logger.warning(
+                f"Training uses {max_images}/{len(image_files)} images "
+                f"(VRAM limit). Remaining {len(image_files) - max_images} images skipped."
+            )
+            if callback:
+                callback(f"注意: VRAM制限のため {max_images}/{len(image_files)} 枚のみ使用")
         image_files = image_files[:max_images]
 
         latent_cache = []
@@ -444,18 +451,32 @@ class BodyGenerator:
         )
 
         logger.info("Loading ControlNet (openpose)...")
-        controlnet = ControlNetModel.from_pretrained(
-            "lllyasviel/control_v11p_sd15_openpose",
-            torch_dtype=torch.float16,
-        )
+        try:
+            controlnet = ControlNetModel.from_pretrained(
+                "lllyasviel/control_v11p_sd15_openpose",
+                torch_dtype=torch.float16,
+            )
+        except Exception as e:
+            logger.error(f"ControlNet download/load failed: {e}")
+            raise RuntimeError(
+                "ControlNet モデルのダウンロードに失敗しました。"
+                "ネットワーク接続を確認するか、手動でモデルをダウンロードしてください: "
+                "lllyasviel/control_v11p_sd15_openpose"
+            ) from e
 
         logger.info("Loading Stable Diffusion pipeline...")
-        self._pipe = StableDiffusionControlNetPipeline.from_pretrained(
-            base_model,
-            controlnet=controlnet,
-            torch_dtype=torch.float16,
-            safety_checker=None,
-        )
+        try:
+            self._pipe = StableDiffusionControlNetPipeline.from_pretrained(
+                base_model,
+                controlnet=controlnet,
+                torch_dtype=torch.float16,
+                safety_checker=None,
+            )
+        except Exception as e:
+            logger.error(f"SD pipeline load failed: {e}")
+            raise RuntimeError(
+                f"Stable Diffusion パイプラインのロードに失敗: {e}"
+            ) from e
 
         self._pipe.scheduler = UniPCMultistepScheduler.from_config(
             self._pipe.scheduler.config
