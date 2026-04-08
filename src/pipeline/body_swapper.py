@@ -161,7 +161,7 @@ class LoRATrainer:
 
     def _train_local(
         self, data_dir, output_dir, base_model,
-        steps, rank, lr, trigger_word, batch_size, callback,
+        steps, rank, lr, trigger_word, batch_size, callback=None,
     ) -> Path:
         """Real local training loop using diffusers + PEFT"""
         import torch
