@@ -105,7 +105,14 @@ class FaceSwapper:
 
     def _swap_native(self, source_face, target_frame, target_face):
         """使用 InsightFace 原生 swapper"""
-        result = self._swapper.get(target_frame, target_face, source_face, paste_back=True)
+        # Extract raw insightface Face objects from FaceData wrappers
+        raw_source = getattr(source_face, '_raw', None) or source_face
+        raw_target = getattr(target_face, '_raw', None) or target_face
+        # If either is still a FaceData wrapper (no _raw), fall back to ONNX
+        from src.pipeline.face_detector import FaceData
+        if isinstance(raw_source, FaceData) or isinstance(raw_target, FaceData):
+            return self._swap_onnx(source_face, target_frame, target_face)
+        result = self._swapper.get(target_frame, raw_target, raw_source, paste_back=True)
         return result
 
     def _swap_onnx(self, source_face, target_frame, target_face):

@@ -394,6 +394,11 @@ class YovusApp:
             from src.pipeline.body_swapper import BodyGenerator
 
             # Free prior models' VRAM before loading ControlNet+SD
+            # Release InsightFace FaceDetector (~600MB) to avoid OOM on 8GB cards
+            try:
+                fd.release()
+            except Exception:
+                pass
             _gc.collect()
             try:
                 import torch
@@ -481,6 +486,11 @@ class YovusApp:
                         self._add_log(f"全身生成: {i+1}/{len(pose_files)}")
             finally:
                 bg.release()
+                # Re-initialize FaceDetector for downstream face_enhance
+                try:
+                    fd.initialize()
+                except Exception:
+                    pass
             job.shared_data["generated_dir"] = str(gen_dir)
             self._add_log(f"全身生成完了: {len(list(gen_dir.glob('*.png')))} フレーム")
             return {"generated_dir": str(gen_dir)}
@@ -575,15 +585,29 @@ class YovusApp:
             return {}
 
         def lora_train(job, results):
-            """本地 LoRA 训练 (skip if weights already exist)"""
+            """本地 LoRA 训练 (skip if weights already exist for same identity)"""
+            import hashlib
             from src.pipeline.body_swapper import LoRATrainer
 
-            # Check if LoRA weights already exist - skip retraining
+            # Check if LoRA weights already exist FOR THE SAME reference photos
             existing_lora = config.paths.lora_dir / "lora_weights"
+            identity_file = existing_lora / ".identity_hash"
+            # Compute hash of reference photos dir (file list + sizes)
+            ref_dir = job.reference_photos_dir
+            ref_hash = ""
+            if ref_dir and Path(ref_dir).exists():
+                entries = sorted(Path(ref_dir).glob("*"))
+                hash_input = "|".join(f"{p.name}:{p.stat().st_size}" for p in entries if p.is_file())
+                ref_hash = hashlib.md5(hash_input.encode()).hexdigest()[:16]
+
             if existing_lora.exists() and any(existing_lora.glob("*.safetensors")):
-                self._add_log(f"既存のLoRA重みを検出: {existing_lora} — 再学習をスキップします")
-                job.shared_data["lora_path"] = str(existing_lora)
-                return {"lora_path": str(existing_lora)}
+                # Only skip if identity matches (same reference photos)
+                if identity_file.exists() and identity_file.read_text().strip() == ref_hash:
+                    self._add_log(f"既存のLoRA重みを検出 (同一人物): {existing_lora} — 再学習をスキップ")
+                    job.shared_data["lora_path"] = str(existing_lora)
+                    return {"lora_path": str(existing_lora)}
+                else:
+                    self._add_log("参照写真が変更されました。LoRAを再学習します...")
 
             trainer = LoRATrainer(device=config.gpu.device)
 
@@ -614,6 +638,13 @@ class YovusApp:
                     lr=config.body_swap.lora_lr,
                     callback=lambda m: self._add_log(m),
                 )
+
+                # Save identity hash so we can skip retraining for same person
+                try:
+                    id_file = Path(output) / ".identity_hash"
+                    id_file.write_text(ref_hash)
+                except Exception:
+                    pass
 
                 job.shared_data["lora_path"] = str(output)
                 self._add_log(f"LoRA 学習完了: {output}")
