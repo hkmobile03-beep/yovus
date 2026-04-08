@@ -284,18 +284,27 @@ class YovusApp:
             pe = PoseExtractor(device=config.gpu.device)
             pe.initialize()
 
-            for i, fp in enumerate(frame_files):
-                frame = cv2.imread(str(fp))
-                if frame is None:
-                    continue
-                pose = pe.extract_pose(frame)
-                if pose is not None:
-                    cv2.imwrite(str(pose_dir / fp.name), pose)
+            try:
+                for i, fp in enumerate(frame_files):
+                    frame = cv2.imread(str(fp))
+                    if frame is None:
+                        # Write black pose for missing frames to avoid gaps
+                        import numpy as np
+                        black = np.zeros((512, 512, 3), dtype=np.uint8)
+                        cv2.imwrite(str(pose_dir / fp.name), black)
+                        continue
+                    pose = pe.extract_pose(frame)
+                    if pose is not None:
+                        cv2.imwrite(str(pose_dir / fp.name), pose)
+                    else:
+                        import numpy as np
+                        cv2.imwrite(str(pose_dir / fp.name), np.zeros_like(frame))
 
-                if (i + 1) % 30 == 0:
-                    self._add_log(f"姿勢抽出: {i+1}/{len(frame_files)}")
+                    if (i + 1) % 30 == 0:
+                        self._add_log(f"姿勢抽出: {i+1}/{len(frame_files)}")
+            finally:
+                pe.release()
 
-            pe.release()
             job.shared_data["poses_dir"] = str(pose_dir)
             self._add_log(f"姿勢抽出完了: {len(list(pose_dir.glob('*.png')))} フレーム")
             return {"poses_dir": str(pose_dir)}
@@ -313,26 +322,27 @@ class YovusApp:
             mask_dir = config.paths.temp_dir / "masks" / job.job_id
             mask_dir.mkdir(parents=True, exist_ok=True)
 
-            seg = PersonSegmenter(device=config.gpu.device)
+            seg = PersonSegmenter(model_type=config.body_swap.segmentation_model, device=config.gpu.device)
             seg.initialize()
 
-            for i, fp in enumerate(frame_files):
-                frame = cv2.imread(str(fp))
-                if frame is None:
-                    continue
-                mask = seg.segment(frame)
+            try:
+                for i, fp in enumerate(frame_files):
+                    frame = cv2.imread(str(fp))
+                    if frame is None:
+                        continue
+                    mask = seg.segment(frame)
 
-                # 膨胀mask确保完全覆盖人物
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (20, 20))
-                mask = cv2.dilate(mask, kernel, iterations=1)
-                mask = cv2.GaussianBlur(mask, (11, 11), 5)
+                    # 膨胀mask确保完全覆盖人物
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
+                    mask = cv2.dilate(mask, kernel, iterations=1)
+                    mask = cv2.GaussianBlur(mask, (11, 11), 5)
 
-                cv2.imwrite(str(mask_dir / fp.name), mask)
+                    cv2.imwrite(str(mask_dir / fp.name), mask)
 
-                if (i + 1) % 30 == 0:
-                    self._add_log(f"人物分割: {i+1}/{len(frame_files)}")
-
-            seg.release()
+                    if (i + 1) % 30 == 0:
+                        self._add_log(f"人物分割: {i+1}/{len(frame_files)}")
+            finally:
+                seg.release()
             job.shared_data["masks_dir"] = str(mask_dir)
             self._add_log(f"人物分割完了: {len(list(mask_dir.glob('*.png')))} フレーム")
             return {"masks_dir": str(mask_dir)}
@@ -344,29 +354,35 @@ class YovusApp:
 
             frames_dir = Path(job.shared_data.get("frames_dir", ""))
             masks_dir = Path(job.shared_data.get("masks_dir", ""))
+            if not masks_dir.exists():
+                self._add_log("WARNING: Masks dir not found, skipping inpainting")
+                job.shared_data["clean_bg_dir"] = str(frames_dir)
+                return {}
+
             frame_files = sorted(frames_dir.glob("*.png"))
 
             clean_dir = config.paths.temp_dir / "clean_bg" / job.job_id
             clean_dir.mkdir(parents=True, exist_ok=True)
 
-            inpainter = VideoInpainter(device=config.gpu.device, method="simple")
+            inpainter = VideoInpainter(device=config.gpu.device, method=config.inpaint.model)
             inpainter.initialize()
 
-            for i, fp in enumerate(frame_files):
-                frame = cv2.imread(str(fp))
-                mask_path = masks_dir / fp.name
-                mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE) if mask_path.exists() else None
+            try:
+                for i, fp in enumerate(frame_files):
+                    frame = cv2.imread(str(fp))
+                    mask_path = masks_dir / fp.name
+                    mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE) if mask_path.exists() else None
 
-                if frame is not None and mask is not None:
-                    clean = inpainter.inpaint_frame(frame, mask)
-                    cv2.imwrite(str(clean_dir / fp.name), clean)
-                elif frame is not None:
-                    cv2.imwrite(str(clean_dir / fp.name), frame)
+                    if frame is not None and mask is not None:
+                        clean = inpainter.inpaint_frame(frame, mask)
+                        cv2.imwrite(str(clean_dir / fp.name), clean)
+                    elif frame is not None:
+                        cv2.imwrite(str(clean_dir / fp.name), frame)
 
-                if (i + 1) % 30 == 0:
-                    self._add_log(f"背景修復: {i+1}/{len(frame_files)}")
-
-            inpainter.release()
+                    if (i + 1) % 30 == 0:
+                        self._add_log(f"背景修復: {i+1}/{len(frame_files)}")
+            finally:
+                inpainter.release()
             job.shared_data["clean_bg_dir"] = str(clean_dir)
             self._add_log(f"背景修復完了")
             return {"clean_bg_dir": str(clean_dir)}
@@ -374,7 +390,16 @@ class YovusApp:
         def body_generate(job, results):
             """ControlNet + LoRA 全身生成"""
             import cv2
+            import gc as _gc
             from src.pipeline.body_swapper import BodyGenerator
+
+            # Free prior models' VRAM before loading ControlNet+SD
+            _gc.collect()
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
 
             poses_dir = Path(job.shared_data.get("poses_dir", ""))
             pose_files = sorted(poses_dir.glob("*.png"))
@@ -385,69 +410,76 @@ class YovusApp:
             gen_dir = config.paths.temp_dir / "generated" / job.job_id
             gen_dir.mkdir(parents=True, exist_ok=True)
 
-            # Find LoRA weights (diffusers format: pytorch_lora_weights.safetensors)
-            lora_path = config.paths.lora_dir / "lora_weights"
-            if not lora_path.exists() or not (lora_path / "pytorch_lora_weights.safetensors").exists():
+            # Find LoRA: first from shared_data (if lora_train stage ran), then filesystem
+            lora_path = job.shared_data.get("lora_path")
+            if lora_path:
+                lora_path = Path(lora_path)
+            if not lora_path or not lora_path.exists():
+                lora_path = config.paths.lora_dir / "lora_weights"
+            if not lora_path.exists() or not any(lora_path.glob("*.safetensors")):
                 lora_path = None
-                # Search for any dir with LoRA weights
                 if config.paths.lora_dir.exists():
                     for p in config.paths.lora_dir.iterdir():
-                        if p.is_dir():
-                            if (p / "pytorch_lora_weights.safetensors").exists():
-                                lora_path = p
-                                break
-                            if (p / "adapter_config.json").exists():
-                                lora_path = p
-                                break
+                        if p.is_dir() and any(p.glob("*.safetensors")):
+                            lora_path = p
+                            break
 
             bg = BodyGenerator(device=config.gpu.device)
-            has_lora = lora_path is not None and Path(lora_path).exists()
-            bg.initialize(lora_path=lora_path if has_lora else None)
-            if has_lora:
-                self._add_log(f"LoRA loaded: {lora_path}")
-            else:
-                self._add_log("WARNING: LoRA not found, generating without identity preservation")
+            has_lora = lora_path is not None and lora_path.exists()
 
-            # Get original frame size for proper generation
-            frames_dir = Path(job.shared_data.get("frames_dir", ""))
-            sample_frame = cv2.imread(str(sorted(frames_dir.glob("*.png"))[0]))
-            orig_h, orig_w = sample_frame.shape[:2]
+            try:
+                bg.initialize(lora_path=lora_path if has_lora else None)
+                if has_lora:
+                    self._add_log(f"LoRA loaded: {lora_path}")
+                else:
+                    self._add_log("WARNING: LoRA未検出。汎用人物で生成します。先にModelsタブでLoRA学習を実行してください。")
 
-            # Generation size (must be divisible by 8, fit in VRAM)
-            gen_w = min(orig_w, 768)
-            gen_h = min(orig_h, 768)
-            gen_w = gen_w - (gen_w % 8)
-            gen_h = gen_h - (gen_h % 8)
+                # Get original frame size
+                frames_dir = Path(job.shared_data.get("frames_dir", ""))
+                frame_list = sorted(frames_dir.glob("*.png"))
+                if not frame_list:
+                    raise ValueError("No frames found")
+                sample_frame = cv2.imread(str(frame_list[0]))
+                if sample_frame is None:
+                    raise ValueError(f"Cannot read sample frame: {frame_list[0]}")
+                orig_h, orig_w = sample_frame.shape[:2]
 
-            self._add_log(f"生成サイズ: {gen_w}x{gen_h} (元: {orig_w}x{orig_h})")
+                # Generation size (divisible by 8, fit in VRAM)
+                gen_w = max(8, min(orig_w, 768))
+                gen_h = max(8, min(orig_h, 768))
+                gen_w = gen_w - (gen_w % 8)
+                gen_h = gen_h - (gen_h % 8)
 
-            for i, fp in enumerate(pose_files):
-                pose = cv2.imread(str(fp))
-                if pose is None:
-                    continue
+                self._add_log(f"生成サイズ: {gen_w}x{gen_h} (元: {orig_w}x{orig_h})")
 
-                generated = bg.generate(
-                    pose,
-                    prompt="a photo of sks person, full body, high quality, detailed, professional photography, natural lighting",
-                    negative_prompt="low quality, blurry, deformed, extra limbs, bad anatomy, disfigured, ugly, text, watermark",
-                    num_inference_steps=30,
-                    controlnet_conditioning_scale=0.85,
-                    guidance_scale=7.5,
-                    width=gen_w,
-                    height=gen_h,
-                    seed=42 + i,  # 一定のシード + フレーム番号 で一貫性
-                )
+                # Use fixed seed base for temporal consistency
+                seed_base = 42
+                for i, fp in enumerate(pose_files):
+                    pose = cv2.imread(str(fp))
+                    if pose is None:
+                        continue
 
-                # Resize back to original
-                if generated.shape[:2] != (orig_h, orig_w):
-                    generated = cv2.resize(generated, (orig_w, orig_h), interpolation=cv2.INTER_LANCZOS4)
+                    generated = bg.generate(
+                        pose,
+                        prompt="a photo of sks person, full body, high quality, detailed, professional photography, natural lighting",
+                        negative_prompt="low quality, blurry, deformed, extra limbs, bad anatomy, disfigured, ugly, text, watermark",
+                        num_inference_steps=config.body_swap.inference_steps,
+                        controlnet_conditioning_scale=config.body_swap.controlnet_strength,
+                        guidance_scale=config.body_swap.guidance_scale,
+                        width=gen_w,
+                        height=gen_h,
+                        seed=seed_base + i,
+                    )
 
-                cv2.imwrite(str(gen_dir / fp.name), generated)
+                    if generated.shape[:2] != (orig_h, orig_w):
+                        generated = cv2.resize(generated, (orig_w, orig_h), interpolation=cv2.INTER_LANCZOS4)
 
-                if (i + 1) % 10 == 0:
-                    self._add_log(f"全身生成: {i+1}/{len(pose_files)}")
+                    cv2.imwrite(str(gen_dir / fp.name), generated)
 
-            bg.release()
+                    if (i + 1) % 10 == 0:
+                        self._add_log(f"全身生成: {i+1}/{len(pose_files)}")
+            finally:
+                bg.release()
             job.shared_data["generated_dir"] = str(gen_dir)
             self._add_log(f"全身生成完了: {len(list(gen_dir.glob('*.png')))} フレーム")
             return {"generated_dir": str(gen_dir)}
@@ -557,13 +589,13 @@ class YovusApp:
             )
             self._add_log(f"データ準備完了: {prep['count']} 枚")
 
-            # Train
+            # Train using config values
             output = trainer.train(
                 Path(prep["path"]),
                 config.paths.lora_dir,
-                steps=1500,
-                rank=16,
-                lr=1e-4,
+                steps=config.body_swap.lora_training_steps,
+                rank=config.body_swap.lora_rank,
+                lr=config.body_swap.lora_lr,
                 callback=lambda m: self._add_log(m),
             )
 
@@ -573,6 +605,8 @@ class YovusApp:
 
         def video_encode(job, results):
             swapped_dir = Path(job.shared_data.get("swapped_dir", job.shared_data.get("frames_dir", "")))
+            if not swapped_dir.exists() or not list(swapped_dir.glob("*.png")):
+                raise ValueError(f"No output frames found in {swapped_dir}")
             fps = job.shared_data.get("fps", 30.0)
             audio_src = job.source_video if job.shared_data.get("has_audio") else None
             vp.encode_video(swapped_dir, job.output_path, fps=fps, audio_source=audio_src)

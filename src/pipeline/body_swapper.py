@@ -416,6 +416,11 @@ class PoseExtractor:
     def release(self):
         self._detector = None
         gc.collect()
+        try:
+            import torch
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
 
 
 class BodyGenerator:
