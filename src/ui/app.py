@@ -61,13 +61,15 @@ class YovusApp:
         if not photos:
             return "No photos found", [], self._get_logs()
 
-        # Copy preview images to temp dir so Gradio can serve them
+        # Copy preview images to system temp dir (Gradio always allows this)
         import shutil
-        preview_dir = config.paths.temp_dir / "photo_preview"
+        import tempfile
+        preview_dir = Path(tempfile.gettempdir()) / "yovus_preview"
         preview_dir.mkdir(parents=True, exist_ok=True)
         # Clean old previews
         for old in preview_dir.iterdir():
-            old.unlink(missing_ok=True)
+            if old.is_file():
+                old.unlink(missing_ok=True)
 
         preview_paths = []
         for p in sorted(photos)[:20]:
