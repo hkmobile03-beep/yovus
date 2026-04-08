@@ -63,9 +63,10 @@ class PipelineEngine:
         "face_and_body": [
             ("video_decode", "映像解析", 0.05),
             ("face_detect_reference", "参照顔検出", 0.05),
-            ("pose_estimate", "姿勢推定", 0.10),
-            ("body_segment", "人物分割", 0.10),
-            ("face_swap", "顔交換", 0.20),
+            ("pose_estimate", "姿勢推定", 0.08),
+            ("body_segment", "人物分割", 0.08),
+            ("inpaint_mask", "背景修復", 0.07),
+            ("face_swap", "顔交換", 0.17),
             ("body_generate", "身体生成", 0.20),
             ("composite", "合成融合", 0.10),
             ("face_enhance", "顔補正", 0.05),

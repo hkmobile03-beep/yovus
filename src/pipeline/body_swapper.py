@@ -284,7 +284,7 @@ class LoRATrainer:
                 callback("オプティマイザ: AdamW (標準)")
 
         # Mixed precision scaler for stable fp16 training
-        scaler = torch.cuda.amp.GradScaler()
+        scaler = torch.amp.GradScaler("cuda")
 
         # 4) Training loop
         unet.train()
@@ -307,7 +307,7 @@ class LoRATrainer:
             noisy_latent = scheduler.add_noise(latent, noise, timestep)
 
             # Forward pass with mixed precision
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast("cuda"):
                 noise_pred = unet(
                     noisy_latent, timestep,
                     encoder_hidden_states=text_embeds_expanded,
