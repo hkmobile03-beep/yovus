@@ -65,18 +65,19 @@
     font-size: 13px !important;
     font-weight: 400 !important;
     letter-spacing: 2px !important;
-    color: var(--jp-text-secondary) !important;
+    color: #2C2C2C !important;
     border: none !important;
     border-bottom: 2px solid transparent !important;
     padding: 12px 24px !important;
-    background: transparent !important;
+    background: #FFFFFF !important;
     transition: all 0.3s ease !important;
 }
 
 .tab-nav button.selected {
-    color: var(--jp-text-primary) !important;
+    color: #2C2C2C !important;
+    font-weight: 500 !important;
     border-bottom-color: var(--jp-accent) !important;
-    background: transparent !important;
+    background: #FFFFFF !important;
 }
 
 /* Cards */
@@ -217,6 +218,126 @@ input[type="range"] {
 
 .jp-animate {
     animation: jp-fade-in 0.4s ease forwards;
+}
+
+/* ================================================
+   Gradio 6.0 Text Color Overrides
+   Fix: white-on-white text in Gradio Soft theme
+   ================================================ */
+
+/* All labels (input fields, dropdowns, sliders, etc.) */
+.gradio-container label,
+.gradio-container .label-wrap,
+.gradio-container .label-wrap span,
+.gradio-container .gr-label,
+.gradio-container .gr-input-label,
+.gradio-container .block label span,
+.gradio-container .block .label-wrap span {
+    color: var(--jp-text-primary) !important;
+}
+
+/* All general text elements */
+.gradio-container span,
+.gradio-container p,
+.gradio-container h1,
+.gradio-container h2,
+.gradio-container h3,
+.gradio-container h4,
+.gradio-container h5,
+.gradio-container h6 {
+    color: var(--jp-text-primary) !important;
+}
+
+/* Radio buttons and checkboxes text */
+.gradio-container .gr-radio label,
+.gradio-container .gr-checkbox label,
+.gradio-container input[type="radio"] + label,
+.gradio-container input[type="checkbox"] + label,
+.gradio-container .radio-group label,
+.gradio-container .checkbox-group label,
+.gradio-container .wrap label span {
+    color: var(--jp-text-primary) !important;
+}
+
+/* Dropdown / Select text */
+.gradio-container .gr-dropdown,
+.gradio-container .gr-dropdown .option,
+.gradio-container select option,
+.gradio-container .secondary-wrap span,
+.gradio-container .single-select span {
+    color: var(--jp-text-primary) !important;
+}
+
+/* Markdown content */
+.gradio-container .markdown-text,
+.gradio-container .markdown-text p,
+.gradio-container .markdown-text span,
+.gradio-container .markdown-text li,
+.gradio-container .markdown-text h1,
+.gradio-container .markdown-text h2,
+.gradio-container .markdown-text h3,
+.gradio-container .prose,
+.gradio-container .prose p,
+.gradio-container .prose span {
+    color: var(--jp-text-primary) !important;
+}
+
+/* Slider labels and values */
+.gradio-container .range-slider span,
+.gradio-container .range_slider span,
+.gradio-container .slider-label,
+.gradio-container .number-input span {
+    color: var(--jp-text-primary) !important;
+}
+
+/* Input text color */
+.gradio-container input[type="text"],
+.gradio-container input[type="number"],
+.gradio-container textarea,
+.gradio-container select {
+    color: var(--jp-text-primary) !important;
+    background: var(--jp-bg-card) !important;
+}
+
+/* Accordion headers */
+.gradio-container .accordion > button,
+.gradio-container .accordion > button span,
+.gradio-container details summary,
+.gradio-container details summary span {
+    color: var(--jp-text-primary) !important;
+}
+
+/* File upload text */
+.gradio-container .file-preview span,
+.gradio-container .upload-text span,
+.gradio-container .file-upload span {
+    color: var(--jp-text-primary) !important;
+}
+
+/* Tab navigation - ensure dark text */
+.gradio-container .tab-nav button,
+.gradio-container .tabs > .tab-nav > button {
+    color: var(--jp-text-secondary) !important;
+    background: var(--jp-bg-card) !important;
+}
+
+.gradio-container .tab-nav button.selected,
+.gradio-container .tabs > .tab-nav > button.selected {
+    color: var(--jp-text-primary) !important;
+    background: var(--jp-bg-card) !important;
+    border-bottom: 2px solid var(--jp-accent) !important;
+}
+
+/* Override Gradio dark theme variables that may leak through */
+.gradio-container {
+    --body-text-color: var(--jp-text-primary) !important;
+    --block-label-text-color: var(--jp-text-primary) !important;
+    --block-title-text-color: var(--jp-text-primary) !important;
+    --input-text-color: var(--jp-text-primary) !important;
+    --checkbox-label-text-color: var(--jp-text-primary) !important;
+    --section-header-text-color: var(--jp-text-primary) !important;
+    --body-text-color-subdued: var(--jp-text-secondary) !important;
+    --color-accent-soft: var(--jp-accent-light) !important;
 }
 
 /* Scrollbar */

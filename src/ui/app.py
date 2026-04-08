@@ -422,11 +422,19 @@ class YovusApp:
                 lora_path = Path(lora_path)
             if not lora_path or not lora_path.exists():
                 lora_path = config.paths.lora_dir / "lora_weights"
-            if not lora_path.exists() or not any(lora_path.glob("*.safetensors")):
+            # Check for PEFT format (adapter_config.json) or diffusers format (*.safetensors)
+            has_lora_files = (
+                lora_path.exists()
+                and (
+                    any(lora_path.glob("*.safetensors"))
+                    or (lora_path / "adapter_config.json").exists()
+                )
+            )
+            if not has_lora_files:
                 lora_path = None
                 if config.paths.lora_dir.exists():
                     for p in config.paths.lora_dir.iterdir():
-                        if p.is_dir() and any(p.glob("*.safetensors")):
+                        if p.is_dir() and (any(p.glob("*.safetensors")) or (p / "adapter_config.json").exists()):
                             lora_path = p
                             break
 
@@ -608,7 +616,14 @@ class YovusApp:
                     job.shared_data["lora_path"] = str(existing_lora)
                     return {"lora_path": str(existing_lora)}
                 else:
-                    self._add_log("参照写真が変更されました。LoRAを再学習します...")
+                    self._add_log("参照写真が変更されました。古いLoRA重みを削除して再学習します...")
+                    # Delete old LoRA weights to avoid mixing identities
+                    import shutil
+                    try:
+                        shutil.rmtree(existing_lora)
+                        self._add_log("古いLoRA重み削除完了")
+                    except Exception as del_err:
+                        self._add_log(f"古いLoRA削除警告: {del_err}")
 
             trainer = LoRATrainer(device=config.gpu.device)
 

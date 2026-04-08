@@ -17,7 +17,16 @@ def preview():
 
     lora_path = PROJECT_ROOT / "models" / "lora" / "lora_weights"
 
-    if not lora_path.exists() or not any(lora_path.glob("*.safetensors")):
+    if not lora_path.exists():
+        print("ERROR: LoRA weights directory not found. Please train first.")
+        return
+
+    has_weights = (
+        any(lora_path.glob("*.safetensors"))
+        or any(lora_path.glob("*.bin"))
+        or (lora_path / "adapter_config.json").exists()
+    )
+    if not has_weights:
         print("ERROR: LoRA weights not found. Please train first.")
         return
 

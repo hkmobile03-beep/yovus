@@ -40,13 +40,17 @@ class LoRATrainer:
         trigger_word: str = "sks",
         progress_callback: Optional[Callable] = None,
     ) -> dict:
-        """准备训练数据: 裁剪、对齐、自动标注"""
+        """准备训练数据: 中心裁剪、人脸提取、多样标注"""
         import cv2
 
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         img_dir = output_dir / "images"
         img_dir.mkdir(exist_ok=True)
+
+        # Clean previous training data to avoid mixing identities
+        for old_file in img_dir.glob("*"):
+            old_file.unlink(missing_ok=True)
 
         photo_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
         photos = sorted([
@@ -57,7 +61,33 @@ class LoRATrainer:
         if not photos:
             raise ValueError(f"写真が見つかりません: {photos_dir}")
 
+        # Varied captions for better identity learning
+        caption_templates = [
+            f"a photo of {trigger_word} person, high quality, detailed face, sharp focus",
+            f"a portrait of {trigger_word} person, professional photography, studio lighting",
+            f"a photo of {trigger_word} person, natural lighting, high resolution, clear face",
+            f"{trigger_word} person, front view, high quality photograph, detailed",
+            f"a professional photo of {trigger_word} person, sharp, well-lit, detailed features",
+        ]
+
+        # Face close-up caption templates
+        face_caption_templates = [
+            f"a close up face photo of {trigger_word} person, detailed face, high quality, sharp focus",
+            f"a headshot of {trigger_word} person, portrait, studio quality, detailed facial features",
+            f"close up portrait of {trigger_word} person, clear face, professional photography",
+        ]
+
+        # Initialize face detector for face cropping
+        face_cascade = None
+        try:
+            face_cascade = cv2.CascadeClassifier(
+                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            )
+        except Exception:
+            pass
+
         processed = 0
+        face_crops = 0
         skipped = 0
         total = len(photos)
 
@@ -73,39 +103,70 @@ class LoRATrainer:
                     skipped += 1
                     continue
 
-                # Resize maintaining aspect ratio
-                scale = target_size / max(h, w)
-                new_w, new_h = int(w * scale), int(h * scale)
-                img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
-
-                # Pad to square (gray background to avoid training artifacts)
-                canvas = np.full((target_size, target_size, 3), 128, dtype=np.uint8)
-                y_off = (target_size - new_h) // 2
-                x_off = (target_size - new_w) // 2
-                canvas[y_off:y_off + new_h, x_off:x_off + new_w] = img
+                # === Full image: center-crop to square (no gray padding) ===
+                crop_size = min(h, w)
+                y_start = (h - crop_size) // 2
+                x_start = (w - crop_size) // 2
+                cropped = img[y_start:y_start + crop_size, x_start:x_start + crop_size]
+                resized = cv2.resize(cropped, (target_size, target_size), interpolation=cv2.INTER_LANCZOS4)
 
                 out_path = img_dir / f"{processed:06d}.png"
-                cv2.imwrite(str(out_path), canvas)
+                cv2.imwrite(str(out_path), resized)
 
                 if auto_caption:
-                    caption = f"a photo of {trigger_word} person, high quality, detailed"
+                    caption = caption_templates[processed % len(caption_templates)]
                     caption_path = img_dir / f"{processed:06d}.txt"
                     caption_path.write_text(caption, encoding="utf-8")
 
                 processed += 1
 
+                # === Face close-up crop (every 3rd image) for identity learning ===
+                if face_cascade is not None and idx % 3 == 0:
+                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(80, 80))
+                    if len(faces) > 0:
+                        # Get largest face
+                        fx, fy, fw, fh = max(faces, key=lambda f: f[2] * f[3])
+                        # Expand crop area around face (2x padding for context)
+                        pad = int(max(fw, fh) * 0.8)
+                        fx1 = max(0, fx - pad)
+                        fy1 = max(0, fy - pad)
+                        fx2 = min(w, fx + fw + pad)
+                        fy2 = min(h, fy + fh + pad)
+                        face_img = img[fy1:fy2, fx1:fx2]
+
+                        if face_img.size > 0:
+                            # Center-crop face region to square
+                            fh2, fw2 = face_img.shape[:2]
+                            fcs = min(fh2, fw2)
+                            fys = (fh2 - fcs) // 2
+                            fxs = (fw2 - fcs) // 2
+                            face_sq = face_img[fys:fys + fcs, fxs:fxs + fcs]
+                            face_resized = cv2.resize(face_sq, (target_size, target_size), interpolation=cv2.INTER_LANCZOS4)
+
+                            face_path = img_dir / f"{processed:06d}.png"
+                            cv2.imwrite(str(face_path), face_resized)
+
+                            if auto_caption:
+                                face_caption = face_caption_templates[face_crops % len(face_caption_templates)]
+                                face_cap_path = img_dir / f"{processed:06d}.txt"
+                                face_cap_path.write_text(face_caption, encoding="utf-8")
+
+                            processed += 1
+                            face_crops += 1
+
                 if progress_callback and (idx + 1) % 50 == 0:
-                    progress_callback(f"データ準備: {idx + 1}/{total} ({processed} 成功)")
+                    progress_callback(f"データ準備: {idx + 1}/{total} ({processed} 成功, 顔クロップ {face_crops})")
 
             except Exception as e:
                 logger.debug(f"Skip {photo.name}: {e}")
                 skipped += 1
 
         if progress_callback:
-            progress_callback(f"データ準備完了: {processed} 枚 ({skipped} スキップ)")
+            progress_callback(f"データ準備完了: {processed} 枚 (顔クロップ {face_crops} 枚含む, {skipped} スキップ)")
 
-        logger.info(f"Prepared {processed} training images in {img_dir}")
-        return {"count": processed, "skipped": skipped, "path": str(img_dir)}
+        logger.info(f"Prepared {processed} training images ({face_crops} face crops) in {img_dir}")
+        return {"count": processed, "face_crops": face_crops, "skipped": skipped, "path": str(img_dir)}
 
     def train(
         self,
@@ -213,7 +274,7 @@ class LoRATrainer:
             raise ValueError(f"No training images found in {img_dir}")
 
         # Limit to reasonable number for 8GB VRAM training
-        max_images = min(len(image_files), 200)
+        max_images = min(len(image_files), 300)
         if len(image_files) > max_images:
             logger.warning(
                 f"Training uses {max_images}/{len(image_files)} images "
@@ -252,11 +313,15 @@ class LoRATrainer:
 
         unet.enable_gradient_checkpointing()
 
-        # Apply LoRA
+        # Apply LoRA - target cross-attention + self-attention + feedforward for stronger identity
         lora_config = LoraConfig(
             r=rank,
-            lora_alpha=rank,  # scaling = alpha/r = 1.0 (standard)
-            target_modules=["to_k", "to_q", "to_v", "to_out.0"],
+            lora_alpha=rank * 2,  # scaling = 2.0 for stronger identity preservation
+            target_modules=[
+                "to_k", "to_q", "to_v", "to_out.0",  # cross-attention
+                "ff.net.0.proj", "ff.net.2",  # feedforward layers (carry identity info)
+                "proj_in", "proj_out",  # projection layers
+            ],
             lora_dropout=0.05,
         )
         unet = get_peft_model(unet, lora_config)
@@ -287,18 +352,30 @@ class LoRATrainer:
         # Mixed precision scaler for stable fp16 training
         scaler = torch.amp.GradScaler("cuda")
 
+        # Learning rate scheduler - cosine annealing with warmup
+        warmup_steps = min(100, steps // 10)
+        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=steps - warmup_steps, eta_min=lr * 0.1,
+        )
+
         # 4) Training loop
         unet.train()
         num_latents = len(latent_cache)
         text_embeds_expanded = text_embeds.to(device, dtype=dtype)
 
         if callback:
-            callback(f"学習開始: {steps} steps...")
+            callback(f"学習開始: {steps} steps (warmup: {warmup_steps})...")
 
         for step in range(steps):
+            # Linear warmup
+            if step < warmup_steps:
+                warmup_lr = lr * (step + 1) / warmup_steps
+                for pg in optimizer.param_groups:
+                    pg['lr'] = warmup_lr
+
             # Random latent from cache (random sampling, not sequential)
-            idx = torch.randint(0, num_latents, (1,)).item()
-            latent = latent_cache[idx].to(device, dtype=dtype)
+            lat_idx = torch.randint(0, num_latents, (1,)).item()
+            latent = latent_cache[lat_idx].to(device, dtype=dtype)
 
             # Random noise
             noise = torch.randn_like(latent)
@@ -323,10 +400,15 @@ class LoRATrainer:
             scaler.step(optimizer)
             scaler.update()
 
-            if callback and (step + 1) % 50 == 0:
-                callback(f"Step {step+1}/{steps} | Loss: {loss.item():.4f}")
+            # Step LR scheduler after warmup
+            if step >= warmup_steps:
+                lr_scheduler.step()
 
-            # Save checkpoint in diffusers-compatible format
+            if callback and (step + 1) % 50 == 0:
+                current_lr = optimizer.param_groups[0]['lr']
+                callback(f"Step {step+1}/{steps} | Loss: {loss.item():.4f} | LR: {current_lr:.2e}")
+
+            # Save checkpoint
             if (step + 1) % max(1, steps // 3) == 0:
                 self._save_lora_diffusers(unet, output_dir / f"checkpoint-{step+1}")
 
@@ -348,26 +430,40 @@ class LoRATrainer:
 
     @staticmethod
     def _save_lora_diffusers(peft_unet, save_dir: Path):
-        """Save LoRA weights in diffusers-compatible format"""
+        """Save LoRA weights in PEFT-native format (most compatible with diffusers load_lora_weights)"""
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
 
+        # Remove any old pytorch_lora_weights.safetensors that might conflict
+        old_diffusers = save_dir / "pytorch_lora_weights.safetensors"
+        if old_diffusers.exists():
+            old_diffusers.unlink()
+
         try:
-            from peft import get_peft_model_state_dict
-            from safetensors.torch import save_file
-
-            state_dict = get_peft_model_state_dict(peft_unet)
-            # Convert PEFT keys to diffusers LoRA format
-            diffusers_dict = {}
-            for key, val in state_dict.items():
-                new_key = key.replace("base_model.model.", "")
-                diffusers_dict[new_key] = val.cpu()
-
-            save_file(diffusers_dict, str(save_dir / "pytorch_lora_weights.safetensors"))
-            logger.info(f"LoRA weights saved (diffusers format): {save_dir}")
-        except Exception as e:
-            logger.warning(f"Diffusers format save failed: {e}, saving PEFT format")
+            # Use PEFT's native save_pretrained - produces adapter_model.safetensors + adapter_config.json
+            # This is the most reliable format for diffusers load_lora_weights()
             peft_unet.save_pretrained(str(save_dir))
+            logger.info(f"LoRA weights saved (PEFT native format): {save_dir}")
+        except Exception as e:
+            logger.warning(f"PEFT save_pretrained failed: {e}, trying manual save")
+            try:
+                from peft import get_peft_model_state_dict
+                from safetensors.torch import save_file
+
+                state_dict = get_peft_model_state_dict(peft_unet)
+                # Clean up keys for diffusers compatibility
+                diffusers_dict = {}
+                for key, val in state_dict.items():
+                    new_key = key.replace("base_model.model.", "")
+                    # Remove adapter name (e.g. ".default") from key path
+                    new_key = new_key.replace(".default", "")
+                    diffusers_dict[new_key] = val.cpu()
+
+                save_file(diffusers_dict, str(save_dir / "pytorch_lora_weights.safetensors"))
+                logger.info(f"LoRA weights saved (manual diffusers format): {save_dir}")
+            except Exception as e2:
+                logger.error(f"All LoRA save methods failed: {e2}")
+                raise
 
 
 class PoseExtractor:
@@ -538,9 +634,23 @@ class BodyGenerator:
 
         # Load LoRA BEFORE cpu_offload (offload hooks can interfere with weight injection)
         if lora_path and Path(lora_path).exists():
-            logger.info(f"Loading LoRA weights: {lora_path}")
-            self._pipe.load_lora_weights(str(lora_path))
-            logger.info("LoRA weights loaded")
+            lora_path = Path(lora_path)
+            logger.info(f"Loading LoRA weights from: {lora_path}")
+            try:
+                self._pipe.load_lora_weights(str(lora_path))
+                logger.info("LoRA weights loaded successfully")
+            except Exception as lora_err:
+                logger.warning(f"Standard LoRA load failed: {lora_err}")
+                # Try loading individual safetensors file directly
+                safetensors_files = list(lora_path.glob("*.safetensors"))
+                if safetensors_files:
+                    try:
+                        self._pipe.load_lora_weights(str(safetensors_files[0]))
+                        logger.info(f"LoRA loaded from file: {safetensors_files[0].name}")
+                    except Exception as e2:
+                        logger.error(f"All LoRA load attempts failed: {e2}")
+                else:
+                    logger.error("No safetensors files found in LoRA directory")
 
         # 8GB VRAM optimization (must be after LoRA loading)
         self._pipe.enable_model_cpu_offload()
