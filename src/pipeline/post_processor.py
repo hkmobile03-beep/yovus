@@ -149,6 +149,9 @@ class FaceEnhancer:
             face_helper.get_face_landmarks_5(only_center_face=False, resize=640, eye_dist_threshold=5)
             face_helper.align_warp_face()
 
+            if not face_helper.cropped_faces:
+                return image
+
             for cropped_face in face_helper.cropped_faces:
                 cropped_face_t = torch.from_numpy(
                     cropped_face.transpose(2, 0, 1).astype(np.float32) / 255.0
@@ -159,7 +162,7 @@ class FaceEnhancer:
                     output = net(cropped_face_t, w=blend_factor, adain=True)[0]
                     restored_face = output.squeeze().clamp(-1, 1)
                     restored_face = ((restored_face + 1) / 2 * 255).cpu().numpy().transpose(1, 2, 0).astype(np.uint8)
-                    restored_face = cv2.cvtColor(restored_face, cv2.COLOR_RGB2BGR)
+                    # Output is already in BGR order (same as input), no conversion needed
 
                 face_helper.add_restored_face(restored_face)
 
@@ -307,10 +310,10 @@ class Compositor:
         if mask.sum() == 0:
             return target
 
-        # 确保 mask 是单通道 uint8
+        # 确保 mask 是单通道二值 uint8 (seamlessClone requires 0/255)
         if mask.ndim == 3:
             mask = mask[:, :, 0]
-        mask = mask.astype(np.uint8)
+        _, mask = cv2.threshold(mask.astype(np.uint8), 127, 255, cv2.THRESH_BINARY)
 
         moments = cv2.moments(mask)
         if moments["m00"] == 0:

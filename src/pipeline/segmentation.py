@@ -43,8 +43,8 @@ class PersonSegmenter:
             from rembg import new_session
             self._model = new_session("u2net_human_seg")
             logger.info("U2Net human segmentation initialized")
-        except ImportError:
-            logger.warning("rembg not installed, trying MediaPipe")
+        except Exception as e:
+            logger.warning(f"rembg/U2Net init failed: {e}, trying MediaPipe")
             self._init_mediapipe()
 
     def _init_mediapipe(self):
@@ -64,8 +64,8 @@ class PersonSegmenter:
             self._model = new_session("u2net")
             self.model_type = "u2net"
             logger.info("rembg (U2Net) initialized")
-        except ImportError:
-            logger.warning("rembg not available")
+        except Exception as e:
+            logger.warning(f"rembg not available: {e}")
             self._init_mediapipe()
 
     def segment(self, image: np.ndarray) -> np.ndarray:
@@ -92,7 +92,9 @@ class PersonSegmenter:
         import cv2
         from rembg import remove
 
-        result = remove(image, session=self._model, only_mask=True)
+        # rembg expects RGB input (uses PIL internally)
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        result = remove(image_rgb, session=self._model, only_mask=True)
         if isinstance(result, np.ndarray):
             mask = result
         else:
@@ -111,7 +113,9 @@ class PersonSegmenter:
         h, w = image.shape[:2]
         mask = np.zeros((h, w), dtype=np.uint8)
 
-        rect = (int(w * 0.1), int(h * 0.02), int(w * 0.8), int(h * 0.96))
+        # GrabCut rect is (x, y, width, height)
+        rx, ry = int(w * 0.1), int(h * 0.02)
+        rect = (rx, ry, int(w * 0.8) - rx, int(h * 0.96) - ry)
         bgd_model = np.zeros((1, 65), np.float64)
         fgd_model = np.zeros((1, 65), np.float64)
 
@@ -120,7 +124,7 @@ class PersonSegmenter:
             cv2.grabCut(image, gc_mask, rect, bgd_model, fgd_model, 3, cv2.GC_INIT_WITH_RECT)
             mask = np.where((gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
         except cv2.error:
-            cv2.ellipse(mask, (w // 2, h // 2), (w // 3, h // 2 - 10), 0, 0, 360, 255, -1)
+            cv2.ellipse(mask, (w // 2, h // 2), (max(1, w // 3), max(1, h // 2 - 10)), 0, 0, 360, 255, -1)
 
         mask = cv2.GaussianBlur(mask, (7, 7), 3)
         return mask

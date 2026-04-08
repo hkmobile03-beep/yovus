@@ -102,9 +102,8 @@ class VideoInpainter:
 
         # 膨胀 mask (确保完全覆盖人物)
         if dilate_pixels > 0:
-            kernel = cv2.getStructuringElement(
-                cv2.MORPH_ELLIPSE, (dilate_pixels * 2, dilate_pixels * 2)
-            )
+            ksize = dilate_pixels * 2 + 1  # odd-sized kernel
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
             mask = cv2.dilate(mask, kernel, iterations=1)
 
         # 平滑边缘
@@ -207,7 +206,9 @@ class VideoInpainter:
 
         # 可选: Poisson blend 让边缘更自然
         try:
-            mask_uint8 = (new_mask_3ch[:, :, 0] * 255).astype(np.uint8) if new_mask_3ch.ndim == 3 else (new_mask_3ch * 255).astype(np.uint8)
+            mask_float = new_mask_3ch[:, :, 0] if new_mask_3ch.ndim == 3 else new_mask_3ch
+            # Binary threshold for seamlessClone (requires 0/255 mask)
+            mask_uint8 = ((mask_float > 0.5) * 255).astype(np.uint8)
             moments = cv2.moments(mask_uint8)
             if moments["m00"] > 0:
                 cx = int(moments["m10"] / moments["m00"])
@@ -230,8 +231,9 @@ class VideoInpainter:
         h, w = frame.shape[:2]
         mask = np.zeros((h, w), dtype=np.uint8)
 
-        # 假设人物在中央区域
-        rect = (int(w * 0.15), int(h * 0.02), int(w * 0.7), int(h * 0.96))
+        # 假设人物在中央区域 (x, y, width, height)
+        rx, ry = int(w * 0.15), int(h * 0.02)
+        rect = (rx, ry, int(w * 0.7) - rx, int(h * 0.96) - ry)
 
         bgd_model = np.zeros((1, 65), np.float64)
         fgd_model = np.zeros((1, 65), np.float64)
@@ -250,3 +252,8 @@ class VideoInpainter:
         self._model = None
         import gc
         gc.collect()
+        try:
+            import torch
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
