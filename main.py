@@ -49,11 +49,30 @@ def main():
     app = create_app()
 
     logger.info(f"Server starting at http://localhost:{config.server_port}")
-    app.launch(
-        server_name="0.0.0.0",
-        server_port=config.server_port,
-        share=config.share,
-    )
+
+    # Build launch kwargs
+    import gradio as gr
+    launch_kwargs = {
+        "server_name": "0.0.0.0",
+        "server_port": config.server_port,
+        "share": config.share,
+        "allowed_paths": [str(config.paths.temp_dir), str(config.paths.output_dir)],
+    }
+
+    # For Gradio 6.0+, pass theme/css to launch()
+    import inspect
+    launch_params = inspect.signature(app.launch).parameters
+    if "theme" in launch_params:
+        from src.ui.app import load_css
+        launch_kwargs["theme"] = gr.themes.Soft(
+            primary_hue=gr.themes.colors.orange,
+            secondary_hue=gr.themes.colors.stone,
+            neutral_hue=gr.themes.colors.stone,
+            font=gr.themes.GoogleFont("Noto Sans JP"),
+        )
+        launch_kwargs["css"] = load_css()
+
+    app.launch(**launch_kwargs)
 
 
 if __name__ == "__main__":

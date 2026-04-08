@@ -57,11 +57,26 @@ class YovusApp:
         if not photos_dir or not Path(photos_dir).exists():
             return "Directory not found", [], self._get_logs()
         exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-        photos = [str(f) for f in Path(photos_dir).iterdir() if f.suffix.lower() in exts]
+        photos = [f for f in Path(photos_dir).iterdir() if f.suffix.lower() in exts]
         if not photos:
             return "No photos found", [], self._get_logs()
+
+        # Copy preview images to temp dir so Gradio can serve them
+        import shutil
+        preview_dir = config.paths.temp_dir / "photo_preview"
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        # Clean old previews
+        for old in preview_dir.iterdir():
+            old.unlink(missing_ok=True)
+
+        preview_paths = []
+        for p in sorted(photos)[:20]:
+            dst = preview_dir / p.name
+            shutil.copy2(p, dst)
+            preview_paths.append(str(dst))
+
         self._add_log(f"Scanned: {len(photos)} photos")
-        return f"Found: {len(photos)} photos", photos[:20], self._get_logs()
+        return f"Found: {len(photos)} photos", preview_paths, self._get_logs()
 
     def on_analyze_video(self, video_path):
         if not video_path or not Path(video_path).exists():
@@ -355,16 +370,19 @@ class YovusApp:
     # ── Build UI ──
 
     def build(self):
-        css = load_css()
-        with gr.Blocks(
-            title="YOVUS", css=css,
-            theme=gr.themes.Soft(
-                primary_hue=gr.themes.colors.orange,
-                secondary_hue=gr.themes.colors.stone,
-                neutral_hue=gr.themes.colors.stone,
-                font=gr.themes.GoogleFont("Noto Sans JP"),
-            ),
-        ) as app:
+        self._css = load_css()
+        self._theme = gr.themes.Soft(
+            primary_hue=gr.themes.colors.orange,
+            secondary_hue=gr.themes.colors.stone,
+            neutral_hue=gr.themes.colors.stone,
+            font=gr.themes.GoogleFont("Noto Sans JP"),
+        )
+        # Pass theme/css to Blocks for Gradio <6.0, launch() will override for >=6.0
+        try:
+            app = gr.Blocks(title="YOVUS", css=self._css, theme=self._theme)
+        except TypeError:
+            app = gr.Blocks(title="YOVUS")
+        with app:
 
             gr.HTML("""<div class="yovus-header"><h1>Y O V U S</h1><p>AI Persona Replacement System  Local and Cloud</p></div>""")
 
