@@ -251,10 +251,10 @@ class YovusApp:
             if not swapped_dir.exists():
                 return {}
 
+            from src.pipeline.post_processor import FaceEnhancer
+            import cv2
+            fe = FaceEnhancer(model_type=enhancer, device=config.gpu.device, models_dir=config.paths.models_dir)
             try:
-                from src.pipeline.post_processor import FaceEnhancer
-                import cv2
-                fe = FaceEnhancer(model_type=enhancer, device=config.gpu.device, models_dir=config.paths.models_dir)
                 frames = sorted(swapped_dir.glob("*.png"))
                 for i, fp in enumerate(frames):
                     frame = cv2.imread(str(fp))
@@ -263,9 +263,10 @@ class YovusApp:
                         cv2.imwrite(str(fp), enhanced)
                     if (i+1) % 50 == 0:
                         self._add_log(f"Enhance: {i+1}/{len(frames)}")
-                fe.release()
             except Exception as e:
-                self._add_log(f"Enhancement skipped: {e}")
+                self._add_log(f"Enhancement error: {e}")
+            finally:
+                fe.release()
             return {}
 
         def pose_estimate(job, results):
