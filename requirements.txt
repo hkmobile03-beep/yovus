@@ -24,7 +24,7 @@ codeformer-pip>=0.0.2
 
 # ── Segmentation ──
 rembg>=2.0.50
-mediapipe>=0.10.0
+mediapipe==0.10.14  # 0.10.15+ removed mediapipe.solutions, breaks DWPose/OpenPose
 
 # ── Pose Estimation ──
 controlnet-aux>=0.0.7
