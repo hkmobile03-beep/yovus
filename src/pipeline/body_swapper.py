@@ -128,13 +128,13 @@ class IdentityAnalyzer:
         try:
             import httpx
 
-            # Lightweight models first (identity detection doesn't need heavy reasoning)
+            # Vision-capable models only (lite models don't support images)
             model_candidates = [
-                "gemini-2.0-flash-lite",
-                "gemini-2.0-flash-lite-001",
                 "gemini-1.5-flash",
-                "gemini-1.5-flash-8b",
+                "gemini-1.5-flash-latest",
                 "gemini-2.0-flash",
+                "gemini-1.5-pro",
+                "gemini-pro-vision",
             ]
 
             payload = {
@@ -158,16 +158,20 @@ class IdentityAnalyzer:
                     if resp.status_code == 200:
                         used_model = model_name
                         break
-                    elif resp.status_code == 404:
-                        logger.debug(f"Model {model_name} not available, trying next...")
-                        continue
                     else:
-                        resp.raise_for_status()
-                except httpx.HTTPStatusError:
+                        error_detail = ""
+                        try:
+                            error_detail = resp.json().get("error", {}).get("message", "")
+                        except Exception:
+                            error_detail = resp.text[:200]
+                        logger.debug(f"Model {model_name}: HTTP {resp.status_code} - {error_detail}")
+                        continue
+                except Exception as req_err:
+                    logger.debug(f"Model {model_name}: request error - {req_err}")
                     continue
 
             if resp is None or resp.status_code != 200:
-                logger.warning("All Gemini models failed")
+                logger.warning("All Gemini models failed. Using local analysis.")
                 return None
 
             logger.info(f"Using Gemini model: {used_model}")
@@ -392,9 +396,9 @@ class IdentityAnalyzer:
         if ages:
             avg_age = sum(ages) / len(ages)
             result["age_avg"] = int(avg_age)
-            if avg_age < 25:
+            if avg_age < 35:
                 result["age_range"] = "young"
-            elif avg_age < 45:
+            elif avg_age < 50:
                 result["age_range"] = "middle-aged"
             else:
                 result["age_range"] = "elderly"
@@ -476,6 +480,9 @@ class IdentityAnalyzer:
 
         # Build natural language description
         result["description"] = self._build_description(result)
+        # Fix grammar: "a Asian" → "an Asian", "a elderly" → "an elderly"
+        if result["description"].startswith("a ") and result["description"][2:3] in "AEIOUaeiou":
+            result["description"] = "an " + result["description"][2:]
 
         return result
 
