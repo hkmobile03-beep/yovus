@@ -157,28 +157,55 @@ def ensure_max_height(
     output_video: str,
     max_height: int = 1080,
     crf: int = 18,
+    max_dim: int = 1920,
 ) -> Path:
-    """Re-encode ``input_video`` so its height is at most ``max_height``.
+    """Re-encode ``input_video`` so it fits within both height and max-dim
+    limits while preserving aspect ratio.
 
-    If ``max_height`` is ``<= 0`` the check is disabled and the source file
-    is returned as-is. If the video is already small enough, the file is
-    returned as-is (no transcoding). Otherwise ffmpeg scales keeping the
-    aspect ratio, ensures dimensions are even, and writes H.264 + AAC to
-    ``output_video``.
+    Two constraints are applied together:
+
+    - ``max_height``  : the output height must be <= this value (<=0 disables)
+    - ``max_dim``     : neither width nor height may exceed this value; this
+                        matters for ultra-wide sources where scaling by height
+                        alone would still leave the width too large. The fal
+                        Pixverse Swap endpoint rejects anything with a side
+                        longer than 1920, hence the default. (<=0 disables)
+
+    The source file is returned as-is if both constraints are already
+    satisfied, or if both constraints are disabled. Otherwise ffmpeg
+    transcodes to H.264 + AAC at an exact, even width/height that honors
+    both caps.
     """
     src = Path(input_video)
-    if max_height <= 0:
+    if max_height <= 0 and max_dim <= 0:
         return src
+
+    info = probe(str(src))
+    w, h = info.width, info.height
+    if w <= 0 or h <= 0:
+        raise RuntimeError(f"Invalid video dimensions {w}x{h} in {src}")
+
+    # Work out the largest scale factor that still honors both caps.
+    scale = 1.0
+    if max_height > 0 and h > max_height:
+        scale = min(scale, max_height / h)
+    if max_dim > 0 and max(w, h) * scale > max_dim:
+        scale = min(scale, max_dim / max(w, h))
+
+    if scale >= 1.0:
+        # already within both limits — no transcode needed
+        return src
+
+    new_w = int(round(w * scale))
+    new_h = int(round(h * scale))
+    # libx264 + yuv420p requires even dimensions
+    new_w -= new_w % 2
+    new_h -= new_h % 2
 
     dst = Path(output_video)
-    info = probe(str(src))
-
-    if info.height <= max_height:
-        return src
-
     dst.parent.mkdir(parents=True, exist_ok=True)
     ffmpeg = _ffmpeg_binary()
-    vf = f"scale=-2:{max_height}"  # -2 keeps ratio and forces even width
+    vf = f"scale={new_w}:{new_h}"
     cmd = [
         ffmpeg,
         "-y",
@@ -193,6 +220,9 @@ def ensure_max_height(
         "-movflags", "+faststart",
         str(dst),
     ]
-    print(f"[preprocess] downscaling {info.width}x{info.height} -> height {max_height}...")
+    print(
+        f"[preprocess] downscaling {w}x{h} -> {new_w}x{new_h} "
+        f"(max_height={max_height}, max_dim={max_dim})..."
+    )
     subprocess.run(cmd, check=True)
     return dst
