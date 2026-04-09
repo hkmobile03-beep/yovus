@@ -3,6 +3,7 @@ models/
 temp/
 output/
 cache/
+external/
 *.onnx
 *.pth
 *.safetensors
