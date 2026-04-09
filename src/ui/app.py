@@ -635,15 +635,30 @@ class YovusApp:
                 pass
 
             try:
-                # Prepare data
+                # Auto-detect identity features for accurate captions
+                self._add_log("人物特征を自動検出中...")
+                identity_features = None
+                try:
+                    from src.pipeline.body_swapper import IdentityAnalyzer
+                    ia = IdentityAnalyzer(device=config.gpu.device)
+                    identity_features = ia.analyze(job.reference_photos_dir, sample_count=8)
+                    self._add_log(f"検出結果: {identity_features.get('description', 'unknown')}")
+                    self._add_log(f"  性別: {identity_features.get('gender')}, "
+                                  f"年齢: ~{identity_features.get('age_avg')}, "
+                                  f"髪色: {identity_features.get('hair_color')}")
+                except Exception as detect_err:
+                    self._add_log(f"自動検出スキップ: {detect_err} (汎用キャプション使用)")
+
+                # Prepare data with identity-aware captions
                 self._add_log("学習データ準備中...")
                 prep = trainer.prepare_training_data(
                     job.reference_photos_dir,
                     config.paths.temp_dir / "lora_data",
                     target_size=512,
+                    identity_features=identity_features,
                     progress_callback=lambda m: self._add_log(m),
                 )
-                self._add_log(f"データ準備完了: {prep['count']} 枚")
+                self._add_log(f"データ準備完了: {prep['count']} 枚 (顔クロップ {prep.get('face_crops', 0)} 枚)")
 
                 # Train using config values
                 output = trainer.train(

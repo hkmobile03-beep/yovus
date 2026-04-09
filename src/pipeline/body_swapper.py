@@ -24,6 +24,302 @@ import numpy as np
 logger = logging.getLogger("yovus.body_swap")
 
 
+class IdentityAnalyzer:
+    """自动分析参照照片中的人物特征，生成精准提示词"""
+
+    def __init__(self, device: str = "cuda"):
+        self.device = device
+
+    def analyze(self, photos_dir: Path, sample_count: int = 10) -> dict:
+        """
+        分析照片文件夹，返回人物特征描述
+
+        Returns: {
+            "gender": "female" | "male",
+            "age_range": "young" | "middle-aged" | "elderly",
+            "age_avg": 25,
+            "hair_color": "black" | "dark brown" | "brown" | "light brown" | "blonde" | "red" | "gray",
+            "hair_length": "short" | "medium" | "long",
+            "has_bangs": True | False,
+            "skin_tone": "fair" | "medium" | "tan" | "dark",
+            "ethnicity_hint": "Asian" | "European" | "other",
+            "trigger_word": "sks",
+            "description": "a young Asian woman with long dark hair and bangs",
+            "folder_name": "girl",
+        }
+        """
+        import cv2
+
+        photos_dir = Path(photos_dir)
+        photo_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+        photos = sorted([f for f in photos_dir.iterdir() if f.suffix.lower() in photo_exts])
+
+        if not photos:
+            raise ValueError(f"No photos found in {photos_dir}")
+
+        # Sample evenly across the folder
+        step = max(1, len(photos) // sample_count)
+        samples = photos[::step][:sample_count]
+
+        # Collect features from InsightFace
+        genders = []
+        ages = []
+        hair_colors_rgb = []
+        skin_tones_rgb = []
+        bangs_votes = []
+
+        # Try InsightFace first for gender/age
+        fd = None
+        try:
+            from src.pipeline.face_detector import FaceDetector
+            fd = FaceDetector(device=self.device)
+            fd.initialize()
+        except Exception:
+            pass
+
+        for photo_path in samples:
+            img = cv2.imread(str(photo_path))
+            if img is None:
+                continue
+
+            h, w = img.shape[:2]
+
+            # InsightFace analysis
+            if fd is not None:
+                try:
+                    faces = fd.detect(img, max_faces=1)
+                    if faces:
+                        face = faces[0]
+                        if face.gender:
+                            genders.append(face.gender)
+                        if face.age and face.age > 0:
+                            ages.append(face.age)
+
+                        # Extract hair and skin color from face bbox
+                        x1, y1, x2, y2 = [int(v) for v in face.bbox]
+                        face_w = x2 - x1
+                        face_h = y2 - y1
+
+                        # Skin tone: sample center of face
+                        skin_cx = (x1 + x2) // 2
+                        skin_cy = (y1 + y2) // 2
+                        skin_r = max(1, face_w // 6)
+                        skin_region = img[
+                            max(0, skin_cy - skin_r):min(h, skin_cy + skin_r),
+                            max(0, skin_cx - skin_r):min(w, skin_cx + skin_r)
+                        ]
+                        if skin_region.size > 0:
+                            skin_tones_rgb.append(skin_region.mean(axis=(0, 1)))
+
+                        # Hair color: sample region above face
+                        hair_y1 = max(0, y1 - face_h)
+                        hair_y2 = y1
+                        hair_x1 = max(0, x1 - face_w // 4)
+                        hair_x2 = min(w, x2 + face_w // 4)
+                        hair_region = img[hair_y1:hair_y2, hair_x1:hair_x2]
+                        if hair_region.size > 0:
+                            hair_colors_rgb.append(hair_region.mean(axis=(0, 1)))
+
+                        # Bangs detection: check if there are dark pixels on forehead
+                        forehead_y1 = max(0, y1 - face_h // 3)
+                        forehead_y2 = y1 + face_h // 6
+                        forehead_cx1 = x1 + face_w // 4
+                        forehead_cx2 = x2 - face_w // 4
+                        forehead = img[forehead_y1:forehead_y2, forehead_cx1:forehead_cx2]
+                        if forehead.size > 0:
+                            forehead_brightness = forehead.mean()
+                            # If forehead area is darker than skin, likely has bangs
+                            skin_brightness = skin_region.mean() if skin_region.size > 0 else 150
+                            bangs_votes.append(forehead_brightness < skin_brightness * 0.7)
+
+                except Exception:
+                    pass
+            else:
+                # OpenCV fallback: basic face detection
+                try:
+                    cascade = cv2.CascadeClassifier(
+                        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+                    )
+                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    detected = cascade.detectMultiScale(gray, 1.1, 5, minSize=(80, 80))
+                    if len(detected) > 0:
+                        fx, fy, fw, fh = max(detected, key=lambda f: f[2] * f[3])
+                        # Skin tone from face center
+                        scx, scy = fx + fw // 2, fy + fh // 2
+                        sr = max(1, fw // 6)
+                        skin_r = img[max(0, scy - sr):min(h, scy + sr), max(0, scx - sr):min(w, scx + sr)]
+                        if skin_r.size > 0:
+                            skin_tones_rgb.append(skin_r.mean(axis=(0, 1)))
+                        # Hair color above face
+                        hair_r = img[max(0, fy - fh):fy, max(0, fx - fw // 4):min(w, fx + fw + fw // 4)]
+                        if hair_r.size > 0:
+                            hair_colors_rgb.append(hair_r.mean(axis=(0, 1)))
+                except Exception:
+                    pass
+
+        if fd is not None:
+            fd.release()
+
+        # Analyze collected data
+        result = {
+            "trigger_word": "sks",
+            "folder_name": photos_dir.name,
+            "photo_count": len(photos),
+        }
+
+        # Gender
+        if genders:
+            female_count = sum(1 for g in genders if g == "F")
+            male_count = sum(1 for g in genders if g == "M")
+            result["gender"] = "female" if female_count >= male_count else "male"
+        else:
+            # Infer from folder name
+            name_lower = photos_dir.name.lower()
+            female_hints = ["girl", "woman", "female", "lady", "她", "女"]
+            male_hints = ["boy", "man", "male", "guy", "他", "男"]
+            if any(h in name_lower for h in female_hints):
+                result["gender"] = "female"
+            elif any(h in name_lower for h in male_hints):
+                result["gender"] = "male"
+            else:
+                result["gender"] = "female"  # default
+
+        # Age
+        if ages:
+            avg_age = sum(ages) / len(ages)
+            result["age_avg"] = int(avg_age)
+            if avg_age < 25:
+                result["age_range"] = "young"
+            elif avg_age < 45:
+                result["age_range"] = "middle-aged"
+            else:
+                result["age_range"] = "elderly"
+        else:
+            result["age_range"] = "young"
+            result["age_avg"] = 25
+
+        # Hair color (BGR format from OpenCV)
+        if hair_colors_rgb:
+            avg_hair = np.mean(hair_colors_rgb, axis=0)  # BGR
+            b, g, r = avg_hair
+            brightness = (r + g + b) / 3
+            # Classify hair color
+            if brightness < 50:
+                result["hair_color"] = "black"
+            elif brightness < 80:
+                if r > g and r > b:
+                    result["hair_color"] = "dark brown"
+                else:
+                    result["hair_color"] = "black"
+            elif brightness < 120:
+                if r > b * 1.3:
+                    result["hair_color"] = "brown"
+                else:
+                    result["hair_color"] = "dark brown"
+            elif brightness < 160:
+                if r > g * 1.2 and r > b * 1.5:
+                    result["hair_color"] = "red"
+                else:
+                    result["hair_color"] = "light brown"
+            elif brightness < 200:
+                result["hair_color"] = "blonde"
+            else:
+                result["hair_color"] = "gray"
+        else:
+            result["hair_color"] = "dark"
+
+        # Bangs
+        if bangs_votes:
+            result["has_bangs"] = sum(bangs_votes) > len(bangs_votes) / 2
+        else:
+            result["has_bangs"] = False
+
+        # Skin tone
+        if skin_tones_rgb:
+            avg_skin = np.mean(skin_tones_rgb, axis=0)  # BGR
+            skin_brightness = avg_skin.mean()
+            if skin_brightness > 180:
+                result["skin_tone"] = "fair"
+            elif skin_brightness > 150:
+                result["skin_tone"] = "light"
+            elif skin_brightness > 120:
+                result["skin_tone"] = "medium"
+            elif skin_brightness > 90:
+                result["skin_tone"] = "tan"
+            else:
+                result["skin_tone"] = "dark"
+        else:
+            result["skin_tone"] = "medium"
+
+        # Ethnicity hint based on skin + hair combination
+        if result["skin_tone"] in ("fair", "light") and result["hair_color"] in ("black", "dark brown"):
+            result["ethnicity_hint"] = "Asian"
+        elif result["skin_tone"] in ("fair",) and result["hair_color"] in ("blonde", "light brown", "red"):
+            result["ethnicity_hint"] = "European"
+        else:
+            result["ethnicity_hint"] = ""
+
+        # Build natural language description
+        result["description"] = self._build_description(result)
+
+        return result
+
+    def _build_description(self, features: dict) -> str:
+        """从特征字典生成自然语言描述"""
+        parts = []
+
+        # Age + gender
+        gender_word = "woman" if features["gender"] == "female" else "man"
+        if features["age_range"] == "young":
+            parts.append(f"young {gender_word}")
+        elif features["age_range"] == "middle-aged":
+            parts.append(f"{gender_word}")
+        else:
+            parts.append(f"elderly {gender_word}")
+
+        # Ethnicity
+        if features.get("ethnicity_hint"):
+            parts[-1] = f"{features['ethnicity_hint']} " + parts[-1]
+
+        # Hair
+        hair_desc = features.get("hair_color", "dark") + " hair"
+        if features.get("has_bangs"):
+            hair_desc += " with bangs"
+        parts.append(hair_desc)
+
+        return "a " + ", ".join(parts)
+
+    def generate_captions(self, features: dict, count: int = 8) -> list:
+        """基于检测到的特征生成多样化的训练标注"""
+        tw = features["trigger_word"]
+        desc = features["description"]
+        gender = "woman" if features["gender"] == "female" else "man"
+        hair = features.get("hair_color", "dark")
+        bangs = ", bangs" if features.get("has_bangs") else ""
+
+        # Full image captions (varied descriptions)
+        full_captions = [
+            f"a photo of {tw} person, {desc}, high quality, detailed face, sharp focus",
+            f"a portrait of {tw} person, {desc}, professional photography, studio lighting",
+            f"a photo of {tw} person, {desc}, natural lighting, high resolution",
+            f"{tw} person, {desc}, front view, high quality photograph, detailed",
+            f"a professional photo of {tw} person, {gender} with {hair} hair{bangs}, detailed features",
+            f"a photo of {tw} person, {desc}, clear face, well-lit, sharp",
+            f"{tw} person, {gender}, {hair} hair{bangs}, high quality portrait",
+            f"a studio photo of {tw} person, {desc}, professional, detailed",
+        ]
+
+        # Face close-up captions
+        face_captions = [
+            f"a close up face photo of {tw} person, {desc}, detailed face, high quality, sharp focus",
+            f"a headshot of {tw} person, {gender} with {hair} hair{bangs}, studio quality, detailed facial features",
+            f"close up portrait of {tw} person, {desc}, clear face, professional photography",
+            f"face of {tw} person, {desc}, macro detail, sharp focus, high resolution",
+        ]
+
+        return full_captions[:count], face_captions[:max(2, count // 2)]
+
+
 class LoRATrainer:
     """LoRA 微调训练器 - 本地 8GB VRAM 优化"""
 
@@ -39,8 +335,9 @@ class LoRATrainer:
         auto_caption: bool = True,
         trigger_word: str = "sks",
         progress_callback: Optional[Callable] = None,
+        identity_features: Optional[dict] = None,
     ) -> dict:
-        """准备训练数据: 中心裁剪、人脸提取、多样标注"""
+        """准备训练数据: 中心裁剪、人脸提取、基于身份特征的精准标注"""
         import cv2
 
         output_dir = Path(output_dir)
@@ -61,21 +358,25 @@ class LoRATrainer:
         if not photos:
             raise ValueError(f"写真が見つかりません: {photos_dir}")
 
-        # Varied captions for better identity learning
-        caption_templates = [
-            f"a photo of {trigger_word} person, high quality, detailed face, sharp focus",
-            f"a portrait of {trigger_word} person, professional photography, studio lighting",
-            f"a photo of {trigger_word} person, natural lighting, high resolution, clear face",
-            f"{trigger_word} person, front view, high quality photograph, detailed",
-            f"a professional photo of {trigger_word} person, sharp, well-lit, detailed features",
-        ]
-
-        # Face close-up caption templates
-        face_caption_templates = [
-            f"a close up face photo of {trigger_word} person, detailed face, high quality, sharp focus",
-            f"a headshot of {trigger_word} person, portrait, studio quality, detailed facial features",
-            f"close up portrait of {trigger_word} person, clear face, professional photography",
-        ]
+        # Generate captions based on identity features (or use generic fallback)
+        if identity_features:
+            analyzer = IdentityAnalyzer()
+            caption_templates, face_caption_templates = analyzer.generate_captions(identity_features)
+            if progress_callback:
+                progress_callback(f"身份特征: {identity_features.get('description', 'unknown')}")
+        else:
+            caption_templates = [
+                f"a photo of {trigger_word} person, high quality, detailed face, sharp focus",
+                f"a portrait of {trigger_word} person, professional photography, studio lighting",
+                f"a photo of {trigger_word} person, natural lighting, high resolution, clear face",
+                f"{trigger_word} person, front view, high quality photograph, detailed",
+                f"a professional photo of {trigger_word} person, sharp, well-lit, detailed features",
+            ]
+            face_caption_templates = [
+                f"a close up face photo of {trigger_word} person, detailed face, high quality, sharp focus",
+                f"a headshot of {trigger_word} person, portrait, studio quality, detailed facial features",
+                f"close up portrait of {trigger_word} person, clear face, professional photography",
+            ]
 
         # Initialize face detector for face cropping
         face_cascade = None
