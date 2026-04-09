@@ -93,10 +93,25 @@ def build_parser() -> argparse.ArgumentParser:
                              "clustering (default: 0.45).")
     parser.add_argument("--mode", default="person",
                         choices=("person", "object", "background"),
-                        help="Pixverse swap mode (default: person).")
+                        help="Pixverse swap mode (default: person). "
+                             "Ignored when --endpoint=halfmoon.")
     parser.add_argument("--resolution", default=None,
                         choices=("360p", "540p", "720p", "1080p"),
-                        help="Optional output resolution for the swap.")
+                        help="Optional output resolution for the swap "
+                             "(pixverse only).")
+    parser.add_argument("--endpoint", default="pixverse",
+                        choices=("pixverse", "halfmoon"),
+                        help="Which fal endpoint to use. 'pixverse' "
+                             "(default) = fal-ai/pixverse/swap, fast and "
+                             "robust but regenerates more than the face. "
+                             "'halfmoon' = half-moon-ai/ai-face-swap/"
+                             "faceswapvideo, face-only swap that preserves "
+                             "clothes — try this if pixverse drifts across "
+                             "scenes.")
+    parser.add_argument("--keyframe", type=int, default=None,
+                        help="Pixverse keyframe_id. Set to 1 to anchor the "
+                             "swap to the first frame and reduce drift "
+                             "across long videos (pixverse only).")
     parser.add_argument("--keep-audio", dest="keep_audio",
                         action="store_true", default=True,
                         help="Preserve the original audio track (default).")
@@ -237,8 +252,8 @@ def main(argv: List[str] | None = None) -> int:
 
     # ---------------- 7. Call fal ---------------- #
     try:
-        api = FalFaceSwap()
-    except RuntimeError as exc:
+        api = FalFaceSwap(preset=args.endpoint)
+    except (RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
@@ -251,6 +266,7 @@ def main(argv: List[str] | None = None) -> int:
             mode=args.mode,
             resolution=args.resolution,
             original_sound_switch=args.keep_audio,
+            keyframe_id=args.keyframe,
             on_progress=lambda msg: print(f"[cloud] {msg}"),
         )
     except Exception as exc:  # pragma: no cover — network / API errors
