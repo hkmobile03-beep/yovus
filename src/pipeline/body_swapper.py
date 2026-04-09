@@ -145,24 +145,54 @@ class IdentityAnalyzer:
 
         return features
 
-    def _analyze_with_gemini_sdk(self, photos_dir: Path, photos: list, processed: list) -> Optional[dict]:
-        """Use official google-generativeai SDK (most reliable method)."""
+    def _discover_gemini_models(self, client) -> list:
+        """Dynamically discover available Gemini models that support generateContent."""
         try:
-            import google.generativeai as genai
+            vision_models = []
+            for model in client.models.list():
+                name = model.name if isinstance(model.name, str) else str(model.name)
+                # Strip "models/" prefix if present
+                model_id = name.replace("models/", "")
+                # Only include models that support generateContent
+                methods = getattr(model, "supported_generation_methods", []) or []
+                if not methods:
+                    methods = getattr(model, "supported_actions", []) or []
+                # Accept models with generateContent or if we can't check methods
+                if not methods or "generateContent" in methods:
+                    # Prefer flash/pro models, skip embedding/image-gen-only models
+                    if "gemini" in model_id and "embedding" not in model_id:
+                        vision_models.append(model_id)
+            logger.info(f"Discovered {len(vision_models)} Gemini models: {vision_models[:8]}")
+            return vision_models
+        except Exception as e:
+            logger.debug(f"Model discovery failed: {e}")
+            return []
+
+    def _analyze_with_gemini_sdk(self, photos_dir: Path, photos: list, processed: list) -> Optional[dict]:
+        """Use official google-genai SDK (most reliable method)."""
+        try:
+            from google import genai
+            from google.genai import types
             from PIL import Image
             import io
         except ImportError:
-            logger.info("google-generativeai not installed, skipping SDK method")
+            logger.info("google-genai not installed (pip install google-genai), skipping SDK method")
             return None
 
-        genai.configure(api_key=self.gemini_api_key)
+        client = genai.Client(api_key=self.gemini_api_key)
 
-        # Models to try with SDK (it handles endpoint routing automatically)
+        # Preferred models (current as of 2026), then dynamically discovered
         sdk_models = [
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
             "gemini-2.0-flash",
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
         ]
+
+        # Try to discover additional models dynamically
+        discovered = self._discover_gemini_models(client)
+        for m in discovered:
+            if m not in sdk_models:
+                sdk_models.append(m)
 
         # Convert processed images to PIL for SDK
         pil_images = []
@@ -175,13 +205,13 @@ class IdentityAnalyzer:
         for model_name in sdk_models:
             try:
                 logger.info(f"Trying Gemini SDK model: {model_name}...")
-                model = genai.GenerativeModel(model_name)
 
                 # Build content: images + text
                 content_parts = list(pil_images) + [prompt_text]
-                response = model.generate_content(
-                    content_parts,
-                    generation_config=genai.types.GenerationConfig(
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=content_parts,
+                    config=types.GenerateContentConfig(
                         temperature=0.1,
                         max_output_tokens=1024,
                     ),
@@ -233,13 +263,11 @@ class IdentityAnalyzer:
             }
         }
 
-        # Try both v1 and v1beta endpoints, multiple models
+        # Try both v1beta and v1 endpoints, current models (2026)
         model_candidates = [
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
             "gemini-2.0-flash",
-            "gemini-1.5-flash",
-            "gemini-1.5-flash-latest",
-            "gemini-1.5-pro",
-            "gemini-pro-vision",
         ]
         api_versions = ["v1beta", "v1"]
 

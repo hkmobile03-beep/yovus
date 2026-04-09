@@ -3,6 +3,7 @@ Gemini API Connection Test
 Tests both SDK and HTTP methods to verify API key works.
 
 Usage:
+  pip install google-genai
   python scripts/test_gemini.py
 """
 import sys
@@ -13,7 +14,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-logging.basicConfig(level=logging.DEBUG, format="  [%(name)s] %(message)s")
+logging.basicConfig(level=logging.INFO, format="  [%(name)s] %(message)s")
 
 
 def load_key():
@@ -26,60 +27,117 @@ def load_key():
     return key
 
 
-def test_sdk(api_key):
-    """Test with official google-generativeai SDK"""
-    print("\n--- Test 1: google-generativeai SDK ---")
+def test_list_models(api_key):
+    """List available models to find valid model names."""
+    print("\n--- Test 0: List Available Models ---")
     try:
-        import google.generativeai as genai
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        models = []
+        for m in client.models.list():
+            name = m.name if isinstance(m.name, str) else str(m.name)
+            model_id = name.replace("models/", "")
+            if "gemini" in model_id and "embedding" not in model_id:
+                models.append(model_id)
+        print(f"  Found {len(models)} Gemini models:")
+        for m in models[:15]:
+            print(f"    - {m}")
+        if len(models) > 15:
+            print(f"    ... and {len(models) - 15} more")
+        return models
     except ImportError:
-        print("  SKIP: google-generativeai not installed")
-        print("  Install: pip install google-generativeai")
-        return False
+        print("  SKIP: google-genai not installed")
+        print("  Install: pip install google-genai")
+        return []
+    except Exception as e:
+        print(f"  ERROR: {e}")
+        return []
 
-    genai.configure(api_key=api_key)
 
-    models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+def test_sdk(api_key, available_models=None):
+    """Test with official google-genai SDK"""
+    print("\n--- Test 1: google-genai SDK (text) ---")
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError:
+        print("  SKIP: google-genai not installed")
+        print("  Install: pip install google-genai")
+        return False, None
+
+    client = genai.Client(api_key=api_key)
+
+    # Preferred models first, then discovered ones
+    models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
+    if available_models:
+        for m in available_models:
+            if m not in models:
+                models.append(m)
+
     for model_name in models:
         try:
             print(f"  Trying model: {model_name}...")
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content("Say 'hello' in one word.")
+            response = client.models.generate_content(
+                model=model_name,
+                contents="Say 'hello' in one word.",
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    max_output_tokens=64,
+                ),
+            )
             print(f"  SUCCESS! Model: {model_name}")
             print(f"  Response: {response.text[:100]}")
-            return True
+            return True, model_name
         except Exception as e:
-            print(f"  FAILED: {model_name} -> {e}")
+            print(f"  FAILED: {model_name} -> {str(e)[:150]}")
 
-    return False
+    return False, None
 
 
-def test_sdk_with_image(api_key):
+def test_sdk_vision(api_key, working_model=None):
     """Test SDK with an actual image (vision capability)"""
     print("\n--- Test 2: SDK Vision (image input) ---")
     try:
-        import google.generativeai as genai
+        from google import genai
+        from google.genai import types
         from PIL import Image
-        import io
     except ImportError:
         print("  SKIP: missing packages")
         return False
 
-    genai.configure(api_key=api_key)
+    client = genai.Client(api_key=api_key)
 
     # Create a simple test image
     img = Image.new("RGB", (64, 64), color=(200, 150, 100))
-    models = ["gemini-2.0-flash", "gemini-1.5-flash"]
 
-    for model_name in models:
+    models = []
+    if working_model:
+        models.append(working_model)
+    models.extend(["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"])
+    # Deduplicate while preserving order
+    seen = set()
+    unique_models = []
+    for m in models:
+        if m not in seen:
+            seen.add(m)
+            unique_models.append(m)
+
+    for model_name in unique_models:
         try:
             print(f"  Trying vision: {model_name}...")
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content([img, "What color is this image? One word."])
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[img, "What color is this image? One word."],
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    max_output_tokens=64,
+                ),
+            )
             print(f"  SUCCESS! Vision works with: {model_name}")
             print(f"  Response: {response.text[:100]}")
             return True
         except Exception as e:
-            print(f"  FAILED: {model_name} -> {e}")
+            print(f"  FAILED: {model_name} -> {str(e)[:150]}")
 
     return False
 
@@ -93,7 +151,7 @@ def test_http(api_key):
         print("  SKIP: httpx not installed")
         return False
 
-    models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+    models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
     api_versions = ["v1beta", "v1"]
 
     for api_ver in api_versions:
@@ -137,27 +195,30 @@ def main():
 
     print(f"API Key: {api_key[:10]}...{api_key[-4:]}")
 
-    sdk_ok = test_sdk(api_key)
-    vision_ok = test_sdk_with_image(api_key) if sdk_ok else False
+    available = test_list_models(api_key)
+    sdk_ok, working_model = test_sdk(api_key, available)
+    vision_ok = test_sdk_vision(api_key, working_model) if sdk_ok else False
     http_ok = test_http(api_key)
 
     print("\n" + "=" * 50)
     print("  RESULTS")
     print("=" * 50)
-    print(f"  SDK text:    {'OK' if sdk_ok else 'FAILED'}")
-    print(f"  SDK vision:  {'OK' if vision_ok else 'FAILED'}")
-    print(f"  HTTP:        {'OK' if http_ok else 'FAILED'}")
+    print(f"  Model discovery: {'OK (' + str(len(available)) + ' models)' if available else 'FAILED'}")
+    print(f"  SDK text:        {'OK (' + working_model + ')' if sdk_ok else 'FAILED'}")
+    print(f"  SDK vision:      {'OK' if vision_ok else 'FAILED'}")
+    print(f"  HTTP:            {'OK' if http_ok else 'FAILED'}")
 
     if sdk_ok and vision_ok:
         print("\n  Gemini is fully working! Identity analysis will use SDK.")
     elif sdk_ok or http_ok:
-        print("\n  Gemini partially working. Text OK, vision may need different model.")
+        print("\n  Gemini partially working.")
     else:
         print("\n  All methods failed. Possible causes:")
         print("  1. API key invalid or expired")
         print("  2. Generative Language API not enabled in Google Cloud Console")
         print("  3. Network blocked (use VPN if in restricted region)")
         print("  4. Quota exceeded")
+        print("\n  Try: pip install --upgrade google-genai")
 
     print("=" * 50)
 
