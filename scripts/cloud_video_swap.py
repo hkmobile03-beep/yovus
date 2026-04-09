@@ -138,6 +138,66 @@ def download_output(url: str, output_path: Path):
     print(f"  Saved: {output_path} ({size_mb:.1f} MB)")
 
 
+MAX_FAL_DIM = 1920  # fal-ai/pixverse/swap rejects videos >1920x1920
+
+
+def preprocess_video_if_needed(video: Path) -> Path:
+    """Fal rejects videos whose larger dimension exceeds 1920. If the input
+    video is too big, downscale it with ffmpeg to fit within 1920x1920 while
+    preserving aspect ratio, also re-encoding to H.264 which typically shrinks
+    file size dramatically. Returns the path to the video that should be
+    uploaded (either the original or a temp copy)."""
+    import cv2
+    import shutil
+    import subprocess
+
+    cap = cv2.VideoCapture(str(video))
+    if not cap.isOpened():
+        print(f"  WARNING: cannot open video to probe resolution, uploading as-is")
+        return video
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    print(f"  Video resolution: {w}x{h}")
+
+    if max(w, h) <= MAX_FAL_DIM:
+        return video
+
+    if shutil.which("ffmpeg") is None:
+        print(f"  WARNING: video is {w}x{h} (exceeds {MAX_FAL_DIM}) but ffmpeg is")
+        print(f"  not on PATH. Upload will likely fail. Install ffmpeg or manually")
+        print(f"  downscale the video to 1920x1080 or smaller.")
+        return video
+
+    temp_dir = PROJECT_ROOT / "temp" / "cloud_swap_preproc"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    scaled = temp_dir / f"{video.stem}_1920.mp4"
+
+    print(f"  Downscaling to fit {MAX_FAL_DIM}x{MAX_FAL_DIM} via ffmpeg (H.264 re-encode)...")
+    cmd = [
+        "ffmpeg", "-y", "-i", str(video),
+        "-vf",
+        f"scale='if(gt(iw,ih),min({MAX_FAL_DIM},iw),-2)':'if(gt(iw,ih),-2,min({MAX_FAL_DIM},ih))'",
+        "-c:v", "libx264",
+        "-crf", "20",
+        "-preset", "fast",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        str(scaled),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0 or not scaled.exists():
+        print(f"  ERROR: ffmpeg downscale failed")
+        print(f"  stderr: {result.stderr[-500:]}")
+        print(f"  Falling back to original upload (will likely be rejected).")
+        return video
+
+    orig_mb = video.stat().st_size / 1024 / 1024
+    new_mb = scaled.stat().st_size / 1024 / 1024
+    print(f"  Downscaled: {scaled.name} ({orig_mb:.1f} MB -> {new_mb:.1f} MB)")
+    return scaled
+
+
 def extract_video_url(result):
     """Pull the output video URL from whatever JSON shape fal returns."""
     if not isinstance(result, dict):
@@ -166,13 +226,16 @@ def run_video_swap(fal_client, endpoint: dict, source: Path, target_video: Path,
     photo_key = endpoint["photo_key"]
     video_key = endpoint["video_key"]
 
+    # Downscale if the video exceeds fal.ai's 1920x1920 limit.
+    upload_video = preprocess_video_if_needed(target_video)
+
     print(f"\n  Uploading source photo ({source.stat().st_size // 1024} KB) ...")
     source_url = fal_client.upload_file(str(source))
     print(f"  Source uploaded.")
 
-    video_size_mb = target_video.stat().st_size / 1024 / 1024
+    video_size_mb = upload_video.stat().st_size / 1024 / 1024
     print(f"  Uploading target video ({video_size_mb:.1f} MB) ... this may take a while")
-    target_url = fal_client.upload_file(str(target_video))
+    target_url = fal_client.upload_file(str(upload_video))
     print(f"  Video uploaded.")
 
     print(f"\n  Calling {app} ...")
