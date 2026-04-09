@@ -12,6 +12,7 @@ Usage:
 """
 import sys
 import os
+import gc
 import shutil
 import json
 from pathlib import Path
