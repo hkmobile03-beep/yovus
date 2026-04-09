@@ -33,8 +33,12 @@ PROJECT_ROOT = Path(__file__).parent.parent
 PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff"}
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 
-ENDPOINT_VIDEO = "half-moon-ai/ai-face-swap/faceswapvideo"
-ENDPOINT_IMAGE = "half-moon-ai/ai-face-swap/faceswapimage"
+# Fal.ai multi-endpoint app: the base application ID plus a `path` arg for
+# the specific sub-endpoint. Calling subscribe with the full slash-joined
+# string returns 404 / "Application 'ai-face-swap' not found".
+FAL_APP = "half-moon-ai/ai-face-swap"
+PATH_VIDEO = "/faceswapvideo"
+PATH_IMAGE = "/faceswapimage"
 
 
 def pick_best_reference(ref: Path) -> Path:
@@ -144,7 +148,7 @@ def run_image_test(fal_client, source: Path, target_video: Path, output: Path):
     print(f"  Uploading test frame ...")
     target_url = fal_client.upload_file(str(tmp_frame))
 
-    print(f"\n  Calling {ENDPOINT_IMAGE} ...")
+    print(f"\n  Calling {FAL_APP}{PATH_IMAGE} ...")
     start = time.time()
 
     def on_update(update):
@@ -155,11 +159,12 @@ def run_image_test(fal_client, source: Path, target_video: Path, output: Path):
                     print(f"    [fal] {msg}")
 
     result = fal_client.subscribe(
-        ENDPOINT_IMAGE,
+        FAL_APP,
         arguments={
             "source_face_url": source_url,
             "target_image_url": target_url,
         },
+        path=PATH_IMAGE,
         with_logs=True,
         on_queue_update=on_update,
     )
@@ -194,7 +199,7 @@ def run_video_swap(fal_client, source: Path, target_video: Path, output: Path):
     target_url = fal_client.upload_file(str(target_video))
     print(f"  Video uploaded: {target_url[:80]}...")
 
-    print(f"\n  Calling {ENDPOINT_VIDEO} ...")
+    print(f"\n  Calling {FAL_APP}{PATH_VIDEO} ...")
     print(f"  Fal.ai caps: max 25 min video, 25 fps (will truncate/downsample if over)")
     print(f"  Processing starts now. You will see queue updates below.\n")
 
@@ -212,11 +217,12 @@ def run_video_swap(fal_client, source: Path, target_video: Path, output: Path):
             print(f"    [fal] status={status}  elapsed={elapsed:.0f}s")
 
     result = fal_client.subscribe(
-        ENDPOINT_VIDEO,
+        FAL_APP,
         arguments={
             "source_face_url": source_url,
             "target_video_url": target_url,
         },
+        path=PATH_VIDEO,
         with_logs=True,
         on_queue_update=on_update,
     )
@@ -291,7 +297,7 @@ def main():
     print(f"  Target video : {input_video}")
     print(f"  Output       : {output}")
     print(f"  Mode         : {'TEST (1 image swap, cheap)' if args.test_image_only else 'FULL VIDEO'}")
-    print(f"  Endpoint     : {ENDPOINT_IMAGE if args.test_image_only else ENDPOINT_VIDEO}")
+    print(f"  Endpoint     : {FAL_APP}{PATH_IMAGE if args.test_image_only else PATH_VIDEO}")
     print("=" * 60)
     print()
 
