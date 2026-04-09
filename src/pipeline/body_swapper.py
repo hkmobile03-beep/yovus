@@ -127,10 +127,15 @@ class IdentityAnalyzer:
 
         try:
             import httpx
-            url = (
-                f"https://generativelanguage.googleapis.com/v1beta/models/"
-                f"gemini-2.0-flash:generateContent?key={self.gemini_api_key}"
-            )
+
+            # Try multiple model names (availability varies by API key/region)
+            model_candidates = [
+                "gemini-2.0-flash",
+                "gemini-2.0-flash-001",
+                "gemini-1.5-flash",
+                "gemini-1.5-flash-latest",
+                "gemini-1.5-pro",
+            ]
 
             payload = {
                 "contents": [{"parts": parts}],
@@ -141,8 +146,31 @@ class IdentityAnalyzer:
             }
 
             logger.info("Calling Gemini Vision API for identity analysis...")
-            resp = httpx.post(url, json=payload, timeout=60.0)
-            resp.raise_for_status()
+            resp = None
+            used_model = None
+            for model_name in model_candidates:
+                url = (
+                    f"https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{model_name}:generateContent?key={self.gemini_api_key}"
+                )
+                try:
+                    resp = httpx.post(url, json=payload, timeout=60.0)
+                    if resp.status_code == 200:
+                        used_model = model_name
+                        break
+                    elif resp.status_code == 404:
+                        logger.debug(f"Model {model_name} not available, trying next...")
+                        continue
+                    else:
+                        resp.raise_for_status()
+                except httpx.HTTPStatusError:
+                    continue
+
+            if resp is None or resp.status_code != 200:
+                logger.warning("All Gemini models failed")
+                return None
+
+            logger.info(f"Using Gemini model: {used_model}")
             data = resp.json()
 
             # Extract text response
