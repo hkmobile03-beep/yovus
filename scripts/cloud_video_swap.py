@@ -1,9 +1,9 @@
 """
-Cloud video face swap via Fal.ai (Half-Moon AI model).
+Cloud video face swap via Fal.ai.
 
-Replaces every face in a video with the face from a reference photo, using
-the half-moon-ai/ai-face-swap/faceswapvideo endpoint on Fal.ai. This is the
-cheap + fast cloud alternative to running Facefusion locally.
+Replaces faces in a video with the face from a reference photo. Default
+endpoint is fal-ai/pixverse/swap, which is officially maintained by fal.ai
+and works reliably.
 
 Auth:
   The script looks for FAL_KEY in this order:
@@ -15,11 +15,12 @@ Usage:
   python scripts/cloud_video_swap.py <input_video> <reference_photo_or_folder>
   python scripts/cloud_video_swap.py in.mp4 C:\\Users\\junqi\\Desktop\\test
   python scripts/cloud_video_swap.py in.mp4 ref.jpg --output out.mp4
-  python scripts/cloud_video_swap.py in.mp4 ref.jpg --test-image-only   # cheap test: 1 image swap
+  python scripts/cloud_video_swap.py in.mp4 ref.jpg --endpoint half-moon   # alternate, may 404
+  python scripts/cloud_video_swap.py in.mp4 ref.jpg -y                     # skip confirm
 
 Notes:
-  - Fal.ai caps target video at 25 minutes / 25 fps (they will truncate/downsample)
-  - Source photo formats: jpg/jpeg/png/bmp/tiff/webp
+  - fal-ai/pixverse/swap bills roughly $0.15-$0.40 per 5-second clip
+  - Source photo formats: jpg/jpeg/png/webp
   - Keep the source photo a clear frontal face, high resolution
 """
 import argparse
@@ -33,12 +34,23 @@ PROJECT_ROOT = Path(__file__).parent.parent
 PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff"}
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 
-# Fal.ai multi-endpoint app: the base application ID plus a `path` arg for
-# the specific sub-endpoint. Calling subscribe with the full slash-joined
-# string returns 404 / "Application 'ai-face-swap' not found".
-FAL_APP = "half-moon-ai/ai-face-swap"
-PATH_VIDEO = "/faceswapvideo"
-PATH_IMAGE = "/faceswapimage"
+
+# Endpoint presets. Each entry defines the fal.ai application name and how to
+# map our (source_photo, target_video) pair onto its input JSON.
+ENDPOINTS = {
+    "pixverse": {
+        "app": "fal-ai/pixverse/swap",
+        "photo_key": "image_url",
+        "video_key": "video_url",
+        "description": "fal-ai/pixverse/swap (official, stable, ~$0.15-0.40 / 5s)",
+    },
+    "half-moon": {
+        "app": "half-moon-ai/ai-face-swap/faceswapvideo",
+        "photo_key": "source_face_url",
+        "video_key": "target_video_url",
+        "description": "half-moon-ai/ai-face-swap/faceswapvideo (cheaper but may 404 on some accounts)",
+    },
+}
 
 
 def pick_best_reference(ref: Path) -> Path:
@@ -61,14 +73,10 @@ def pick_best_reference(ref: Path) -> Path:
     return best
 
 
-def default_output(input_path: Path, is_image: bool) -> Path:
-    if is_image:
-        out_dir = PROJECT_ROOT / "output" / "cloud_image_swap"
-        suffix = ".png"
-    else:
-        out_dir = PROJECT_ROOT / "output" / "cloud_video_swap"
-        suffix = input_path.suffix or ".mp4"
+def default_output(input_path: Path) -> Path:
+    out_dir = PROJECT_ROOT / "output" / "cloud_video_swap"
     out_dir.mkdir(parents=True, exist_ok=True)
+    suffix = input_path.suffix or ".mp4"
     return out_dir / f"{input_path.stem}_swapped{suffix}"
 
 
@@ -121,7 +129,7 @@ def require_api_key():
 def download_output(url: str, output_path: Path):
     import httpx
     print(f"  Downloading result: {url[:80]}...")
-    with httpx.stream("GET", url, timeout=300, follow_redirects=True) as resp:
+    with httpx.stream("GET", url, timeout=600, follow_redirects=True) as resp:
         resp.raise_for_status()
         with open(output_path, "wb") as f:
             for chunk in resp.iter_bytes(chunk_size=1 << 20):
@@ -130,77 +138,44 @@ def download_output(url: str, output_path: Path):
     print(f"  Saved: {output_path} ({size_mb:.1f} MB)")
 
 
-def run_image_test(fal_client, source: Path, target_video: Path, output: Path):
-    """Cheap sanity test: extract 1 frame from the video and swap as an image."""
-    import subprocess
-    import tempfile
-
-    print("\n  [test mode] Extracting first frame of video for cheap image-swap test...")
-    tmp_frame = Path(tempfile.gettempdir()) / f"yovus_test_frame_{target_video.stem}.png"
-    cmd = ["ffmpeg", "-y", "-i", str(target_video), "-vframes", "1", "-q:v", "2", str(tmp_frame)]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0 or not tmp_frame.exists():
-        print(f"  ERROR: ffmpeg failed to extract frame: {result.stderr[:200]}")
-        sys.exit(1)
-
-    print(f"  Uploading source photo ...")
-    source_url = fal_client.upload_file(str(source))
-    print(f"  Uploading test frame ...")
-    target_url = fal_client.upload_file(str(tmp_frame))
-
-    print(f"\n  Calling {FAL_APP}{PATH_IMAGE} ...")
-    start = time.time()
-
-    def on_update(update):
-        if hasattr(update, "logs") and update.logs:
-            for log in update.logs:
-                msg = log.get("message", "") if isinstance(log, dict) else str(log)
-                if msg:
-                    print(f"    [fal] {msg}")
-
-    result = fal_client.subscribe(
-        FAL_APP,
-        arguments={
-            "source_face_url": source_url,
-            "target_image_url": target_url,
-        },
-        path=PATH_IMAGE,
-        with_logs=True,
-        on_queue_update=on_update,
-    )
-    elapsed = time.time() - start
-    print(f"  Done in {elapsed:.1f}s")
-
-    img_url = ""
-    if isinstance(result, dict):
-        img = result.get("image") or {}
-        img_url = img.get("url") if isinstance(img, dict) else ""
-        if not img_url:
-            img_url = result.get("url", "")
-
-    if not img_url:
-        print(f"  ERROR: no output URL in response: {result}")
-        sys.exit(1)
-
-    download_output(img_url, output)
-    print()
-    print("  TEST COMPLETE. Check the output image.")
-    print("  If the face matches what you want, re-run WITHOUT --test-image-only")
-    print("  to process the full video.")
+def extract_video_url(result):
+    """Pull the output video URL from whatever JSON shape fal returns."""
+    if not isinstance(result, dict):
+        return ""
+    # Common shapes:
+    #   {"video": {"url": "..."}}
+    #   {"video_url": "..."}
+    #   {"output": {"url": "..."}}
+    #   {"url": "..."}
+    vid = result.get("video")
+    if isinstance(vid, dict) and vid.get("url"):
+        return vid["url"]
+    if isinstance(vid, str):
+        return vid
+    for key in ("video_url", "output_url", "url"):
+        if isinstance(result.get(key), str):
+            return result[key]
+    out = result.get("output")
+    if isinstance(out, dict) and out.get("url"):
+        return out["url"]
+    return ""
 
 
-def run_video_swap(fal_client, source: Path, target_video: Path, output: Path):
+def run_video_swap(fal_client, endpoint: dict, source: Path, target_video: Path, output: Path):
+    app = endpoint["app"]
+    photo_key = endpoint["photo_key"]
+    video_key = endpoint["video_key"]
+
     print(f"\n  Uploading source photo ({source.stat().st_size // 1024} KB) ...")
     source_url = fal_client.upload_file(str(source))
-    print(f"  Source uploaded: {source_url[:80]}...")
+    print(f"  Source uploaded.")
 
     video_size_mb = target_video.stat().st_size / 1024 / 1024
     print(f"  Uploading target video ({video_size_mb:.1f} MB) ... this may take a while")
     target_url = fal_client.upload_file(str(target_video))
-    print(f"  Video uploaded: {target_url[:80]}...")
+    print(f"  Video uploaded.")
 
-    print(f"\n  Calling {FAL_APP}{PATH_VIDEO} ...")
-    print(f"  Fal.ai caps: max 25 min video, 25 fps (will truncate/downsample if over)")
+    print(f"\n  Calling {app} ...")
     print(f"  Processing starts now. You will see queue updates below.\n")
 
     start = time.time()
@@ -216,29 +191,31 @@ def run_video_swap(fal_client, source: Path, target_video: Path, output: Path):
             elapsed = time.time() - start
             print(f"    [fal] status={status}  elapsed={elapsed:.0f}s")
 
-    result = fal_client.subscribe(
-        FAL_APP,
-        arguments={
-            "source_face_url": source_url,
-            "target_video_url": target_url,
-        },
-        path=PATH_VIDEO,
-        with_logs=True,
-        on_queue_update=on_update,
-    )
+    try:
+        result = fal_client.subscribe(
+            app,
+            arguments={
+                photo_key: source_url,
+                video_key: target_url,
+            },
+            with_logs=True,
+            on_queue_update=on_update,
+        )
+    except Exception as e:
+        msg = str(e)
+        print(f"\n  ERROR calling {app}: {msg}")
+        if "not found" in msg.lower() or "404" in msg:
+            print()
+            print("  The endpoint returned 404. Try a different preset:")
+            for name, ep in ENDPOINTS.items():
+                if ep["app"] != app:
+                    print(f"    --endpoint {name}   -> {ep['description']}")
+        sys.exit(1)
 
     elapsed = time.time() - start
     print(f"\n  Fal.ai finished in {elapsed:.0f}s")
 
-    # Response shape: { "video": { "url": "...", "content_type": "video/mp4", ... } }
-    video_url = ""
-    if isinstance(result, dict):
-        vid = result.get("video") or {}
-        if isinstance(vid, dict):
-            video_url = vid.get("url", "")
-        if not video_url:
-            video_url = result.get("url", "")
-
+    video_url = extract_video_url(result)
     if not video_url:
         print(f"  ERROR: no output video URL in response")
         print(f"  Raw response: {result}")
@@ -249,7 +226,7 @@ def run_video_swap(fal_client, source: Path, target_video: Path, output: Path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Cloud video face swap via Fal.ai Half-Moon AI",
+        description="Cloud video face swap via Fal.ai",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("input_video", help="Path to input video (mp4/mov/mkv/...)")
@@ -260,10 +237,10 @@ def main():
     )
     parser.add_argument("--output", "-o", help="Output path (default under output/cloud_video_swap/)")
     parser.add_argument(
-        "--test-image-only",
-        action="store_true",
-        help="Cheap test: extract 1 frame from video, swap as image, download. "
-             "Use this to verify identity quality before paying for full video processing.",
+        "--endpoint",
+        choices=list(ENDPOINTS.keys()),
+        default="pixverse",
+        help="Which fal.ai face swap endpoint preset to use (default: pixverse)",
     )
     parser.add_argument(
         "--yes",
@@ -277,6 +254,8 @@ def main():
     require_api_key()
     fal_client = require_fal_client()
 
+    endpoint = ENDPOINTS[args.endpoint]
+
     input_video = Path(args.input_video)
     if not input_video.exists():
         print(f"  ERROR: video not found: {input_video}")
@@ -285,30 +264,25 @@ def main():
         print(f"  WARNING: unusual video extension: {input_video.suffix}")
 
     source = pick_best_reference(Path(args.reference))
-
-    output = Path(args.output) if args.output else default_output(input_video, args.test_image_only)
+    output = Path(args.output) if args.output else default_output(input_video)
     output.parent.mkdir(parents=True, exist_ok=True)
 
     print()
     print("=" * 60)
-    print("  Fal.ai Cloud Video Face Swap (Half-Moon AI)")
+    print("  Fal.ai Cloud Video Face Swap")
     print("=" * 60)
     print(f"  Source photo : {source}")
     print(f"  Target video : {input_video}")
     print(f"  Output       : {output}")
-    print(f"  Mode         : {'TEST (1 image swap, cheap)' if args.test_image_only else 'FULL VIDEO'}")
-    print(f"  Endpoint     : {FAL_APP}{PATH_IMAGE if args.test_image_only else PATH_VIDEO}")
+    print(f"  Endpoint     : {endpoint['app']}")
+    print(f"                 {endpoint['description']}")
     print("=" * 60)
     print()
 
-    if args.test_image_only:
-        print("  Cost estimate: a few cents for a single image swap.")
-    else:
-        video_size_mb = input_video.stat().st_size / 1024 / 1024
-        print(f"  Video size: {video_size_mb:.1f} MB")
-        print("  Cost estimate: depends on duration. Fal.ai bills per video second of")
-        print("  processing. A 1 minute clip is typically well under $1. Check current")
-        print("  pricing at https://fal.ai/models/half-moon-ai/ai-face-swap/faceswapvideo")
+    video_size_mb = input_video.stat().st_size / 1024 / 1024
+    print(f"  Video size: {video_size_mb:.1f} MB")
+    print("  Cost estimate: varies by endpoint and video duration. pixverse/swap")
+    print("  is ~$0.15-0.40 per 5-second clip. A 30-second clip ~ $1-2.50.")
 
     if not args.yes:
         print()
@@ -317,10 +291,7 @@ def main():
             print("  Aborted.")
             sys.exit(0)
 
-    if args.test_image_only:
-        run_image_test(fal_client, source, input_video, output)
-    else:
-        run_video_swap(fal_client, source, input_video, output)
+    run_video_swap(fal_client, endpoint, source, input_video, output)
 
     print()
     print("=" * 60)
