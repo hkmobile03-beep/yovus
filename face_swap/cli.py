@@ -91,8 +91,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--similarity", type=float, default=0.45,
                         help="Cosine similarity threshold for identity "
                              "clustering (default: 0.45).")
-    parser.add_argument("--occlusion", action="store_true",
-                        help="Enable fal occlusion-aware mode (2x cost).")
+    parser.add_argument("--mode", default="person",
+                        choices=("person", "object", "background"),
+                        help="Pixverse swap mode (default: person).")
+    parser.add_argument("--resolution", default=None,
+                        choices=("360p", "540p", "720p", "1080p"),
+                        help="Optional output resolution for the swap.")
+    parser.add_argument("--keep-audio", dest="keep_audio",
+                        action="store_true", default=True,
+                        help="Preserve the original audio track (default).")
+    parser.add_argument("--no-audio", dest="keep_audio",
+                        action="store_false",
+                        help="Drop the original audio track.")
     parser.add_argument("--yes", action="store_true",
                         help="Do not prompt; auto-pick the most-prominent "
                              "identity and proceed.")
@@ -232,13 +242,15 @@ def main(argv: List[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    print("[cloud] calling fal (half-moon-ai/ai-face-swap/faceswapvideo)...")
+    print(f"[cloud] calling fal ({api.endpoint})...")
     try:
         out_path = api.run(
             source_image=str(src_photo),
             target_video=str(scaled_target),
             output_video=args.output,
-            occlusion=args.occlusion,
+            mode=args.mode,
+            resolution=args.resolution,
+            original_sound_switch=args.keep_audio,
             on_progress=lambda msg: print(f"[cloud] {msg}"),
         )
     except Exception as exc:  # pragma: no cover — network / API errors

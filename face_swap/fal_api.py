@@ -1,20 +1,26 @@
 """Thin wrapper around the fal.ai Python client for the video face swap API.
 
-Endpoint: ``half-moon-ai/ai-face-swap/faceswapvideo`` (video-to-video).
+Endpoint: ``fal-ai/pixverse/swap`` (Pixverse Swap — video-to-video face swap).
+
+Why Pixverse Swap?
+    Earlier revisions targeted ``half-moon-ai/ai-face-swap/faceswapvideo``, but
+    fal's routing was returning ``Application "ai-face-swap" not found`` for
+    that 3-segment path regardless of whether the subpath was passed
+    separately. Pixverse Swap lives under the first-party ``fal-ai`` namespace
+    and routes reliably.
 
 Auth:
     Set the ``FAL_KEY`` environment variable to your fal.ai API key.
 
 Input parameters accepted by the endpoint:
-    - ``source_face_url``   (str, required)  reference face image URL
-    - ``target_video_url``  (str, required)  target video URL
-    - ``occlusion``         (bool, optional) enable occlusion-aware model (2x cost)
-
-Notes:
-    - Target video is capped at 25 minutes (longer is truncated).
-    - Target FPS is capped at 25 by the provider.
-    - Supported target formats: avi, m4v, mkv, mp4, mpeg, mov, mxf, webm, wmv.
-    - Supported source image formats: bmp, jpeg, png, tiff, webp.
+    - ``video_url``              (str, required)  target video URL
+    - ``image_url``              (str, required)  reference image URL (new face)
+    - ``mode``                   (str, optional)  "person" (default), "object",
+                                                   or "background"
+    - ``resolution``             (str, optional)  e.g. "360p", "540p", "720p",
+                                                   "1080p". Defaults to the
+                                                   endpoint's own default.
+    - ``original_sound_switch``  (bool, optional) keep original audio track.
 """
 
 from __future__ import annotations
@@ -22,31 +28,9 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional
 
-DEFAULT_ENDPOINT = "half-moon-ai/ai-face-swap/faceswapvideo"
-
-
-def _split_endpoint(endpoint: str) -> Tuple[str, str]:
-    """Split a fal model path into (application, subpath).
-
-    fal applications are ``owner/app`` — anything after the second slash is
-    a route on that application and must be passed via the ``path=`` kwarg
-    of ``fal_client.subscribe`` / ``submit``. Passing a 3-segment string as
-    the application name makes fal respond with
-    ``Application "<app>" not found``.
-
-    Examples
-    --------
-    >>> _split_endpoint("half-moon-ai/ai-face-swap/faceswapvideo")
-    ('half-moon-ai/ai-face-swap', '/faceswapvideo')
-    >>> _split_endpoint("fal-ai/fast-sdxl")
-    ('fal-ai/fast-sdxl', '')
-    """
-    parts = endpoint.strip("/").split("/")
-    if len(parts) >= 3:
-        return "/".join(parts[:2]), "/" + "/".join(parts[2:])
-    return "/".join(parts), ""
+DEFAULT_ENDPOINT = "fal-ai/pixverse/swap"
 
 
 class FalFaceSwap:
@@ -85,8 +69,7 @@ class FalFaceSwap:
             ) from exc
 
         self._fal = fal_client
-        self.raw_endpoint = endpoint
-        self.endpoint, self.subpath = _split_endpoint(endpoint)
+        self.endpoint = endpoint
 
     # ------------------------------------------------------------------ #
     def upload(self, path: str) -> str:
@@ -105,9 +88,11 @@ class FalFaceSwap:
     # ------------------------------------------------------------------ #
     def submit(
         self,
-        source_face_url: str,
-        target_video_url: str,
-        occlusion: bool = False,
+        image_url: str,
+        video_url: str,
+        mode: str = "person",
+        resolution: Optional[str] = None,
+        original_sound_switch: Optional[bool] = None,
         on_progress: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
         """Submit a synchronous face-swap job and return the result dict.
@@ -116,11 +101,14 @@ class FalFaceSwap:
         streams progress events back through ``on_progress``.
         """
         arguments: Dict[str, Any] = {
-            "source_face_url": source_face_url,
-            "target_video_url": target_video_url,
+            "video_url": video_url,
+            "image_url": image_url,
+            "mode": mode,
         }
-        if occlusion:
-            arguments["occlusion"] = True
+        if resolution:
+            arguments["resolution"] = resolution
+        if original_sound_switch is not None:
+            arguments["original_sound_switch"] = original_sound_switch
 
         def _on_update(update: Any) -> None:
             if on_progress is None:
@@ -135,7 +123,6 @@ class FalFaceSwap:
         result = self._fal.subscribe(
             self.endpoint,
             arguments=arguments,
-            path=self.subpath,
             with_logs=True,
             on_queue_update=_on_update,
         )
@@ -164,22 +151,26 @@ class FalFaceSwap:
         source_image: str,
         target_video: str,
         output_video: str,
-        occlusion: bool = False,
+        mode: str = "person",
+        resolution: Optional[str] = None,
+        original_sound_switch: Optional[bool] = None,
         on_progress: Optional[Callable[[str], None]] = None,
     ) -> Path:
         """End-to-end helper: upload inputs, submit, download output."""
         if on_progress:
             on_progress(f"uploading source image: {source_image}")
-        source_url = self.upload(source_image)
+        image_url = self.upload(source_image)
         if on_progress:
             on_progress(f"uploading target video: {target_video}")
         video_url = self.upload(target_video)
         if on_progress:
             on_progress("submitting job to fal…")
         result = self.submit(
-            source_face_url=source_url,
-            target_video_url=video_url,
-            occlusion=occlusion,
+            image_url=image_url,
+            video_url=video_url,
+            mode=mode,
+            resolution=resolution,
+            original_sound_switch=original_sound_switch,
             on_progress=on_progress,
         )
         if on_progress:
