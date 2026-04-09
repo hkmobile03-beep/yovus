@@ -128,13 +128,13 @@ class IdentityAnalyzer:
         try:
             import httpx
 
-            # Try multiple model names (availability varies by API key/region)
+            # Lightweight models first (identity detection doesn't need heavy reasoning)
             model_candidates = [
-                "gemini-2.0-flash",
-                "gemini-2.0-flash-001",
+                "gemini-2.0-flash-lite",
+                "gemini-2.0-flash-lite-001",
                 "gemini-1.5-flash",
-                "gemini-1.5-flash-latest",
-                "gemini-1.5-pro",
+                "gemini-1.5-flash-8b",
+                "gemini-2.0-flash",
             ]
 
             payload = {
