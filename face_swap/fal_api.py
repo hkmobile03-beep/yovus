@@ -22,9 +22,31 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 DEFAULT_ENDPOINT = "half-moon-ai/ai-face-swap/faceswapvideo"
+
+
+def _split_endpoint(endpoint: str) -> Tuple[str, str]:
+    """Split a fal model path into (application, subpath).
+
+    fal applications are ``owner/app`` — anything after the second slash is
+    a route on that application and must be passed via the ``path=`` kwarg
+    of ``fal_client.subscribe`` / ``submit``. Passing a 3-segment string as
+    the application name makes fal respond with
+    ``Application "<app>" not found``.
+
+    Examples
+    --------
+    >>> _split_endpoint("half-moon-ai/ai-face-swap/faceswapvideo")
+    ('half-moon-ai/ai-face-swap', '/faceswapvideo')
+    >>> _split_endpoint("fal-ai/fast-sdxl")
+    ('fal-ai/fast-sdxl', '')
+    """
+    parts = endpoint.strip("/").split("/")
+    if len(parts) >= 3:
+        return "/".join(parts[:2]), "/" + "/".join(parts[2:])
+    return "/".join(parts), ""
 
 
 class FalFaceSwap:
@@ -63,7 +85,8 @@ class FalFaceSwap:
             ) from exc
 
         self._fal = fal_client
-        self.endpoint = endpoint
+        self.raw_endpoint = endpoint
+        self.endpoint, self.subpath = _split_endpoint(endpoint)
 
     # ------------------------------------------------------------------ #
     def upload(self, path: str) -> str:
@@ -112,6 +135,7 @@ class FalFaceSwap:
         result = self._fal.subscribe(
             self.endpoint,
             arguments=arguments,
+            path=self.subpath,
             with_logs=True,
             on_queue_update=_on_update,
         )
