@@ -74,7 +74,7 @@ def main():
         "--execution-providers", args.provider,
         "--output-video-encoder", "libx264",
         "--output-video-quality", str(args.quality),
-        "--face-detector-model", "yoloface",
+        "--face-detector-model", "yolo_face",
     ]
 
     print()

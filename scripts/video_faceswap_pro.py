@@ -73,7 +73,7 @@ def build_facefusion_cmd(args, source: Path, target: Path, output: Path):
         "--execution-providers", args.provider,
         "--output-video-encoder", "libx264",
         "--output-video-quality", str(args.quality),
-        "--face-detector-model", "yoloface",
+        "--face-detector-model", "yolo_face",
         "--face-selector-mode", "reference",
     ]
 
