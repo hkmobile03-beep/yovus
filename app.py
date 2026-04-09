@@ -217,7 +217,7 @@ def build_ui() -> gr.Blocks:
                         label="Swap mode",
                     )
                     resolution = gr.Dropdown(
-                        choices=["", "360p", "540p", "720p", "1080p"],
+                        choices=["", "360p", "540p", "720p"],
                         value="",
                         label="Output resolution (blank = auto)",
                     )

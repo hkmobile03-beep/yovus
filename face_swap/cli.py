@@ -95,8 +95,9 @@ def build_parser() -> argparse.ArgumentParser:
                         choices=("person", "object", "background"),
                         help="Pixverse swap mode (default: person).")
     parser.add_argument("--resolution", default=None,
-                        choices=("360p", "540p", "720p", "1080p"),
-                        help="Optional output resolution for the swap.")
+                        choices=("360p", "540p", "720p"),
+                        help="Optional output resolution for the swap. "
+                             "Pixverse caps at 720p — 1080p is not accepted.")
     parser.add_argument("--keep-audio", dest="keep_audio",
                         action="store_true", default=True,
                         help="Preserve the original audio track (default).")
