@@ -1,0 +1,16 @@
+# Local face detection + embedding (no local swap model needed)
+insightface==0.7.3
+onnxruntime==1.17.1
+numpy==1.26.4
+opencv-python==4.9.0.80
+
+# Progress + video I/O
+tqdm==4.66.2
+imageio==2.34.0
+imageio-ffmpeg==0.4.9
+
+# fal.ai cloud client
+fal-client>=0.5.0
+
+# HTTP (result download)
+requests>=2.31.0

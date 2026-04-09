@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.Python
+build/
+dist/
+
+# Models (downloaded at runtime)
+models/
+*.onnx
+~/.insightface/
+
+# Outputs and temp
+outputs/
+tmp/
+temp/
+*.mp4.tmp
+frames/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Logs
+*.log
