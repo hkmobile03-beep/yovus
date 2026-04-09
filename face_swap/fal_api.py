@@ -1,20 +1,26 @@
-"""Thin wrapper around the fal.ai Python client for video face swap.
+"""Thin wrapper around the fal.ai Python client for the video face swap API.
 
-Two presets are supported, selectable via the ``preset`` kwarg:
+Endpoint: ``fal-ai/pixverse/swap`` (Pixverse Swap — video-to-video face swap).
 
-- ``pixverse`` (default) — ``fal-ai/pixverse/swap``
-    Pixverse's keyframe-based swap. In ``person`` mode it regenerates more
-    than the face (including clothes/hair detail) and can drift across
-    long videos. A ``keyframe_id`` can be supplied to anchor the swap to
-    a specific frame.
-
-- ``halfmoon`` — ``half-moon-ai/ai-face-swap/faceswapvideo``
-    Face-only swap. Keeps clothes and body intact. Slower / rarer on
-    fal's infra; returns "Application not found" if fal routing is
-    flaky — in that case fall back to ``pixverse``.
+Why Pixverse Swap?
+    Earlier revisions targeted ``half-moon-ai/ai-face-swap/faceswapvideo``, but
+    fal's routing was returning ``Application "ai-face-swap" not found`` for
+    that 3-segment path regardless of whether the subpath was passed
+    separately. Pixverse Swap lives under the first-party ``fal-ai`` namespace
+    and routes reliably.
 
 Auth:
     Set the ``FAL_KEY`` environment variable to your fal.ai API key.
+
+Input parameters accepted by the endpoint:
+    - ``video_url``              (str, required)  target video URL
+    - ``image_url``              (str, required)  reference image URL (new face)
+    - ``mode``                   (str, optional)  "person" (default), "object",
+                                                   or "background"
+    - ``resolution``             (str, optional)  e.g. "360p", "540p", "720p",
+                                                   "1080p". Defaults to the
+                                                   endpoint's own default.
+    - ``original_sound_switch``  (bool, optional) keep original audio track.
 """
 
 from __future__ import annotations
@@ -24,14 +30,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-PIXVERSE_ENDPOINT = "fal-ai/pixverse/swap"
-HALFMOON_ENDPOINT = "half-moon-ai/ai-face-swap/faceswapvideo"
-DEFAULT_ENDPOINT = PIXVERSE_ENDPOINT
-
-PRESETS: Dict[str, str] = {
-    "pixverse": PIXVERSE_ENDPOINT,
-    "halfmoon": HALFMOON_ENDPOINT,
-}
+DEFAULT_ENDPOINT = "fal-ai/pixverse/swap"
 
 
 class FalFaceSwap:
@@ -50,8 +49,7 @@ class FalFaceSwap:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        preset: str = "pixverse",
-        endpoint: Optional[str] = None,
+        endpoint: str = DEFAULT_ENDPOINT,
     ) -> None:
         if api_key:
             os.environ["FAL_KEY"] = api_key
@@ -71,12 +69,7 @@ class FalFaceSwap:
             ) from exc
 
         self._fal = fal_client
-        if preset not in PRESETS:
-            raise ValueError(
-                f"Unknown preset {preset!r}. Choose one of {list(PRESETS)}."
-            )
-        self.preset = preset
-        self.endpoint = endpoint or PRESETS[preset]
+        self.endpoint = endpoint
 
     # ------------------------------------------------------------------ #
     def upload(self, path: str) -> str:
@@ -93,38 +86,6 @@ class FalFaceSwap:
         return url
 
     # ------------------------------------------------------------------ #
-    def _build_arguments(
-        self,
-        image_url: str,
-        video_url: str,
-        mode: str,
-        resolution: Optional[str],
-        original_sound_switch: Optional[bool],
-        keyframe_id: Optional[int],
-    ) -> Dict[str, Any]:
-        """Shape the request body based on the active preset."""
-        if self.preset == "halfmoon":
-            args: Dict[str, Any] = {
-                "source_face_url": image_url,
-                "target_video_url": video_url,
-            }
-            return args
-
-        # Default / pixverse
-        args = {
-            "video_url": video_url,
-            "image_url": image_url,
-            "mode": mode,
-        }
-        if resolution:
-            args["resolution"] = resolution
-        if original_sound_switch is not None:
-            args["original_sound_switch"] = original_sound_switch
-        if keyframe_id is not None:
-            args["keyframe_id"] = keyframe_id
-        return args
-
-    # ------------------------------------------------------------------ #
     def submit(
         self,
         image_url: str,
@@ -132,18 +93,22 @@ class FalFaceSwap:
         mode: str = "person",
         resolution: Optional[str] = None,
         original_sound_switch: Optional[bool] = None,
-        keyframe_id: Optional[int] = None,
         on_progress: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
-        """Submit a synchronous face-swap job and return the result dict."""
-        arguments = self._build_arguments(
-            image_url=image_url,
-            video_url=video_url,
-            mode=mode,
-            resolution=resolution,
-            original_sound_switch=original_sound_switch,
-            keyframe_id=keyframe_id,
-        )
+        """Submit a synchronous face-swap job and return the result dict.
+
+        Uses ``fal_client.subscribe`` which blocks until completion and
+        streams progress events back through ``on_progress``.
+        """
+        arguments: Dict[str, Any] = {
+            "video_url": video_url,
+            "image_url": image_url,
+            "mode": mode,
+        }
+        if resolution:
+            arguments["resolution"] = resolution
+        if original_sound_switch is not None:
+            arguments["original_sound_switch"] = original_sound_switch
 
         def _on_update(update: Any) -> None:
             if on_progress is None:
@@ -189,7 +154,6 @@ class FalFaceSwap:
         mode: str = "person",
         resolution: Optional[str] = None,
         original_sound_switch: Optional[bool] = None,
-        keyframe_id: Optional[int] = None,
         on_progress: Optional[Callable[[str], None]] = None,
     ) -> Path:
         """End-to-end helper: upload inputs, submit, download output."""
@@ -200,14 +164,13 @@ class FalFaceSwap:
             on_progress(f"uploading target video: {target_video}")
         video_url = self.upload(target_video)
         if on_progress:
-            on_progress(f"submitting job to fal ({self.endpoint})…")
+            on_progress("submitting job to fal…")
         result = self.submit(
             image_url=image_url,
             video_url=video_url,
             mode=mode,
             resolution=resolution,
             original_sound_switch=original_sound_switch,
-            keyframe_id=keyframe_id,
             on_progress=on_progress,
         )
         if on_progress:
