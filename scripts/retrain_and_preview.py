@@ -130,6 +130,35 @@ def step1_analyze(photos_dir, gemini_key):
     return features, analyzer
 
 
+def _load_sd_pipeline(model_name=None):
+    """Load SD pipeline with Realistic Vision (fallback to vanilla SD 1.5)"""
+    import torch
+    from diffusers import StableDiffusionPipeline, UniPCMultistepScheduler
+    from src.pipeline.body_swapper import REALISTIC_BASE_MODEL, FALLBACK_BASE_MODEL
+
+    base = model_name or REALISTIC_BASE_MODEL
+    try:
+        print(f"  Loading pipeline: {base}...")
+        pipe = StableDiffusionPipeline.from_pretrained(
+            base,
+            torch_dtype=torch.float16,
+            safety_checker=None,
+        )
+    except Exception as e:
+        if base != FALLBACK_BASE_MODEL:
+            print(f"  {base} unavailable ({e}), falling back to SD 1.5...")
+            pipe = StableDiffusionPipeline.from_pretrained(
+                FALLBACK_BASE_MODEL,
+                torch_dtype=torch.float16,
+                safety_checker=None,
+            )
+        else:
+            raise
+
+    pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
+    return pipe
+
+
 def step2_style_preview(features, analyzer):
     """Step 2: Generate style preview WITHOUT training (instant verification)"""
     print("\n" + "=" * 60)
@@ -137,15 +166,8 @@ def step2_style_preview(features, analyzer):
     print("=" * 60)
 
     import torch
-    from diffusers import StableDiffusionPipeline, UniPCMultistepScheduler
 
-    print("  Loading SD 1.5 pipeline...")
-    pipe = StableDiffusionPipeline.from_pretrained(
-        "runwayml/stable-diffusion-v1-5",
-        torch_dtype=torch.float16,
-        safety_checker=None,
-    )
-    pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
+    pipe = _load_sd_pipeline()
     pipe.enable_model_cpu_offload()
     try:
         pipe.enable_xformers_memory_efficient_attention()
@@ -300,22 +322,15 @@ def step4_train(photos_dir, features, cfg):
     return lora_output
 
 
-def step5_verify(features, lora_output, analyzer):
-    """Step 5: Generate identity preview with trained LoRA"""
+def step5_verify(features, lora_output, analyzer, photos_dir=None):
+    """Step 5: Generate identity preview with trained LoRA + face swap"""
     print("\n" + "=" * 60)
     print("  STEP 5/5: Identity Verification Preview")
     print("=" * 60)
 
     import torch
-    from diffusers import StableDiffusionPipeline, UniPCMultistepScheduler
 
-    print("  Loading SD pipeline + trained LoRA...")
-    pipe = StableDiffusionPipeline.from_pretrained(
-        "runwayml/stable-diffusion-v1-5",
-        torch_dtype=torch.float16,
-        safety_checker=None,
-    )
-    pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
+    pipe = _load_sd_pipeline()
 
     # Load LoRA BEFORE cpu_offload
     print(f"  Loading LoRA from: {lora_output}")
@@ -349,6 +364,7 @@ def step5_verify(features, lora_output, analyzer):
     )
 
     generator = torch.Generator(device="cpu").manual_seed(42)
+    generated_paths = []
 
     for prompt, name in prompts:
         print(f"  Generating: {name}...")
@@ -365,10 +381,45 @@ def step5_verify(features, lora_output, analyzer):
 
         out_path = output_dir / f"{name}.png"
         image.save(str(out_path))
+        generated_paths.append(out_path)
         print(f"    Saved: {out_path}")
 
+    # Free SD pipeline VRAM before face swap
     del pipe
     torch.cuda.empty_cache()
+    gc.collect()
+
+    # ── Face swap post-processing: overlay reference face for exact match ──
+    if photos_dir:
+        print(f"\n  Applying face swap for exact identity match...")
+        from src.pipeline.body_swapper import apply_face_swap_to_image
+        from src.config.settings import config
+
+        models_dir = config.paths.models_dir
+        swapped_count = 0
+        for gen_path in generated_paths:
+            # Save original LoRA-only version
+            lora_only = gen_path.parent / f"{gen_path.stem}_lora_only{gen_path.suffix}"
+            shutil.copy2(gen_path, lora_only)
+
+            result = apply_face_swap_to_image(
+                generated_image_path=gen_path,
+                reference_photos_dir=photos_dir,
+                models_dir=models_dir,
+            )
+            if result:
+                swapped_count += 1
+                print(f"    Face swapped: {gen_path.name}")
+            else:
+                print(f"    Face swap skipped: {gen_path.name} (no face detected)")
+
+        if swapped_count > 0:
+            print(f"  Face swap applied to {swapped_count}/{len(generated_paths)} images")
+            print(f"  LoRA-only versions saved as *_lora_only.png")
+        else:
+            print(f"  Face swap not available (inswapper_128.onnx may be missing)")
+            print(f"  Download: https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/inswapper_128.onnx")
+            print(f"  Save to: {models_dir}/inswapper_128.onnx")
 
     print(f"\n  {'━' * 50}")
     print(f"  ┃  TRAINING COMPLETE!")
@@ -377,9 +428,11 @@ def step5_verify(features, lora_output, analyzer):
     print(f"  ┃")
     print(f"  ┃  Style preview:    output/style_preview/")
     print(f"  ┃  Identity preview: output/lora_preview/")
+    print(f"  ┃  (LoRA-only:       *_lora_only.png)")
+    print(f"  ┃  (LoRA+FaceSwap:   identity_*.png)")
     print(f"  ┃")
-    print(f"  ┃  Compare identity_portrait.png with your")
-    print(f"  ┃  reference photos - the face should match.")
+    print(f"  ┃  The face-swapped images should match your")
+    print(f"  ┃  reference photos exactly.")
     print(f"  ┃")
     print(f"  ┃  Ready for video: python main.py")
     print(f"  {'━' * 50}")
@@ -428,8 +481,8 @@ def main():
     # Step 4: Train
     lora_output = step4_train(photos_dir, features, cfg)
 
-    # Step 5: Verify
-    step5_verify(features, lora_output, analyzer)
+    # Step 5: Verify (with face swap post-processing)
+    step5_verify(features, lora_output, analyzer, photos_dir=photos_dir)
 
 
 if __name__ == "__main__":

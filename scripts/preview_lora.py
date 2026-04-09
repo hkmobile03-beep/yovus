@@ -33,11 +33,20 @@ def preview():
     print(f"LoRA weights: {lora_path}")
     print("Loading Stable Diffusion pipeline...")
 
-    pipe = StableDiffusionPipeline.from_pretrained(
-        "runwayml/stable-diffusion-v1-5",
-        torch_dtype=torch.float16,
-        safety_checker=None,
-    )
+    from src.pipeline.body_swapper import REALISTIC_BASE_MODEL, FALLBACK_BASE_MODEL
+    try:
+        pipe = StableDiffusionPipeline.from_pretrained(
+            REALISTIC_BASE_MODEL,
+            torch_dtype=torch.float16,
+            safety_checker=None,
+        )
+    except Exception:
+        print("Realistic Vision unavailable, using SD 1.5...")
+        pipe = StableDiffusionPipeline.from_pretrained(
+            FALLBACK_BASE_MODEL,
+            torch_dtype=torch.float16,
+            safety_checker=None,
+        )
 
     pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
 

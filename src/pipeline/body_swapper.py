@@ -23,6 +23,10 @@ import numpy as np
 
 logger = logging.getLogger("yovus.body_swap")
 
+# Base model: Realistic Vision for photorealistic faces, fallback to vanilla SD 1.5
+REALISTIC_BASE_MODEL = "SG161222/Realistic_Vision_V5.1_noVAE"
+FALLBACK_BASE_MODEL = "runwayml/stable-diffusion-v1-5"
+
 
 class IdentityAnalyzer:
     """自动分析参照照片中的人物特征，生成精准提示词
@@ -692,38 +696,38 @@ class LoRATrainer:
         - 多图(100+): 高rank增加容量, 标准LR
         """
         if image_count < 15:
-            rank = 8
-            lr = 5e-5
-            steps = max(base_steps, image_count * 20)  # ~20 epochs
-            alpha_mult = 1.5
-            reason = f"少量图片({image_count}枚): 低rank防止过拟合, 低LR, 多epochs"
-        elif image_count < 30:
-            rank = 8
-            lr = 8e-5
-            steps = max(base_steps, image_count * 15)  # ~15 epochs
-            alpha_mult = 1.5
-            reason = f"少量図片({image_count}枚): rank=8, 控えめなLR"
-        elif image_count < 100:
             rank = 16
+            lr = 5e-5
+            steps = max(base_steps, image_count * 30)  # ~30 epochs for few images
+            alpha_mult = 2.0
+            reason = f"少量图片({image_count}枚): rank=16, 低LR, 多epochs確保学習"
+        elif image_count < 30:
+            rank = 16
+            lr = 8e-5
+            steps = max(base_steps, image_count * 25)  # ~25 epochs
+            alpha_mult = 2.0
+            reason = f"少量図片({image_count}枚): rank=16, 十分なepochs"
+        elif image_count < 100:
+            rank = 24
+            lr = 1e-4
+            steps = max(base_steps, image_count * 15)  # ~15 epochs
+            alpha_mult = 2.0
+            reason = f"標準({image_count}枚): rank=24, 標準LR"
+        elif image_count < 200:
+            rank = 32
             lr = 1e-4
             steps = max(base_steps, image_count * 10)  # ~10 epochs
             alpha_mult = 2.0
-            reason = f"標準({image_count}枚): rank=16, 標準LR"
-        elif image_count < 200:
-            rank = 24
-            lr = 1e-4
-            steps = max(base_steps, image_count * 8)  # ~8 epochs
-            alpha_mult = 2.0
-            reason = f"大量({image_count}枚): rank=24, 高容量"
+            reason = f"大量({image_count}枚): rank=32, 高容量"
         else:
             rank = 32
             lr = 1e-4
-            steps = max(base_steps, image_count * 6)  # ~6 epochs
+            steps = max(base_steps, image_count * 8)  # ~8 epochs
             alpha_mult = 2.0
             reason = f"超大量({image_count}枚): rank=32, 最大容量"
 
-        # Cap steps at reasonable max for 8GB VRAM (~30 min)
-        steps = min(steps, 5000)
+        # Cap steps at reasonable max for 8GB VRAM (~40 min)
+        steps = min(steps, 6000)
 
         return {
             "rank": rank,
@@ -881,7 +885,7 @@ class LoRATrainer:
         self,
         training_data_dir: Path,
         output_dir: Path,
-        base_model: str = "runwayml/stable-diffusion-v1-5",
+        base_model: str = REALISTIC_BASE_MODEL,
         steps: int = 1500,
         rank: int = 16,
         lr: float = 1e-4,
@@ -1321,7 +1325,7 @@ class BodyGenerator:
         self._pipe = None
         self._initialized = False
 
-    def initialize(self, lora_path: Optional[Path] = None, base_model: str = "runwayml/stable-diffusion-v1-5"):
+    def initialize(self, lora_path: Optional[Path] = None, base_model: str = REALISTIC_BASE_MODEL):
         """初始化 ControlNet + SD + LoRA Pipeline"""
         if self._initialized:
             return
@@ -1442,6 +1446,97 @@ class BodyGenerator:
         result_np = np.array(result)
         result_np = cv2.cvtColor(result_np, cv2.COLOR_RGB2BGR)
         return result_np
+
+
+def apply_face_swap_to_image(
+    generated_image_path: Path,
+    reference_photos_dir: Path,
+    models_dir: Path,
+    output_path: Optional[Path] = None,
+) -> Optional[Path]:
+    """Apply InsightFace face swap to a generated image using reference photo.
+
+    Takes the best reference face and swaps it onto the generated image.
+    This ensures the face matches the reference photos exactly.
+
+    Args:
+        generated_image_path: Path to the AI-generated image
+        reference_photos_dir: Directory with reference photos
+        models_dir: Directory containing inswapper_128.onnx
+        output_path: Output path (defaults to overwrite input)
+
+    Returns:
+        Output path on success, None on failure
+    """
+    import cv2
+
+    if output_path is None:
+        output_path = generated_image_path
+
+    try:
+        from src.pipeline.face_detector import FaceDetector
+        from src.pipeline.face_swapper import FaceSwapper
+
+        # Find best reference photo (one with clearest face)
+        photo_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+        ref_photos = sorted([
+            f for f in Path(reference_photos_dir).iterdir()
+            if f.suffix.lower() in photo_exts
+        ])
+        if not ref_photos:
+            logger.warning("No reference photos found for face swap")
+            return None
+
+        detector = FaceDetector()
+        detector.initialize()
+
+        # Find best reference face
+        best_ref_face = None
+        best_ref_frame = None
+        best_score = 0
+
+        for photo in ref_photos[:5]:  # Check up to 5 photos
+            ref_img = cv2.imread(str(photo))
+            if ref_img is None:
+                continue
+            faces = detector.detect(ref_img, max_faces=1)
+            if faces and faces[0].score > best_score:
+                best_score = faces[0].score
+                best_ref_face = faces[0]
+                best_ref_frame = ref_img
+
+        if best_ref_face is None:
+            logger.warning("No face detected in reference photos")
+            return None
+
+        # Detect face in generated image
+        gen_img = cv2.imread(str(generated_image_path))
+        if gen_img is None:
+            return None
+
+        gen_faces = detector.detect(gen_img, max_faces=1)
+        if not gen_faces:
+            logger.warning("No face detected in generated image")
+            return None
+
+        # Initialize face swapper
+        swapper = FaceSwapper()
+        swapper.initialize(models_dir)
+
+        # Swap face: put reference face onto generated image
+        result = swapper.swap_face(
+            source_face=best_ref_face,
+            target_frame=gen_img,
+            target_face=gen_faces[0],
+        )
+
+        cv2.imwrite(str(output_path), result)
+        logger.info(f"Face swap applied: {output_path}")
+        return output_path
+
+    except Exception as e:
+        logger.warning(f"Face swap post-processing failed: {e}")
+        return None
 
     def release(self):
         self._pipe = None
