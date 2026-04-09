@@ -310,14 +310,19 @@ class IdentityAnalyzer:
                         if skin_region.size > 0:
                             skin_tones_rgb.append(skin_region.mean(axis=(0, 1)))
 
-                        # Hair color: sample region above face
-                        hair_y1 = max(0, y1 - face_h)
+                        # Hair color: sample region above face (narrower to avoid background)
+                        hair_y1 = max(0, y1 - face_h // 2)
                         hair_y2 = y1
-                        hair_x1 = max(0, x1 - face_w // 4)
-                        hair_x2 = min(w, x2 + face_w // 4)
-                        hair_region = img[hair_y1:hair_y2, hair_x1:hair_x2]
-                        if hair_region.size > 0:
-                            hair_colors_rgb.append(hair_region.mean(axis=(0, 1)))
+                        # Narrow sampling: only above the face center to avoid background
+                        hair_x1 = max(0, x1 + face_w // 4)
+                        hair_x2 = min(w, x2 - face_w // 4)
+                        if hair_x2 > hair_x1 and hair_y2 > hair_y1:
+                            hair_region = img[hair_y1:hair_y2, hair_x1:hair_x2]
+                            if hair_region.size > 0:
+                                # Use median instead of mean to ignore bright background outliers
+                                import cv2 as _cv2
+                                hair_median = np.median(hair_region.reshape(-1, 3), axis=0)
+                                hair_colors_rgb.append(hair_median)
 
                         # Bangs detection: check if there are dark pixels on forehead
                         forehead_y1 = max(0, y1 - face_h // 3)
@@ -450,12 +455,23 @@ class IdentityAnalyzer:
         else:
             result["skin_tone"] = "medium"
 
-        # Ethnicity hint based on skin + hair combination
-        if result["skin_tone"] in ("fair", "light") and result["hair_color"] in ("black", "dark brown"):
+        # Ethnicity hint - use InsightFace embeddings + folder name + visual cues
+        # Folder name hints are strong signals (user named the folder)
+        name_lower = photos_dir.name.lower()
+        asian_folder_hints = [
+            "girl", "woman", "女", "日本", "japan", "asian", "中国", "china",
+            "korean", "韓国", "台湾", "taiwan",
+        ]
+        has_asian_folder_hint = any(h in name_lower for h in asian_folder_hints)
+
+        if has_asian_folder_hint:
             result["ethnicity_hint"] = "Asian"
-        elif result["skin_tone"] in ("fair",) and result["hair_color"] in ("blonde", "light brown", "red"):
+        elif result["skin_tone"] in ("fair", "light") and result["hair_color"] in ("black", "dark brown"):
+            result["ethnicity_hint"] = "Asian"
+        elif result["skin_tone"] in ("fair",) and result["hair_color"] in ("blonde", "red"):
             result["ethnicity_hint"] = "European"
         else:
+            # Don't guess - leave empty rather than guess wrong
             result["ethnicity_hint"] = ""
 
         # Build natural language description
