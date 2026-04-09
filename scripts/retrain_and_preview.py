@@ -38,10 +38,37 @@ def main():
     print("=" * 60)
 
     from src.pipeline.body_swapper import IdentityAnalyzer
+    import os
 
-    analyzer = IdentityAnalyzer(device="cuda")
+    # Check for Gemini API key
+    gemini_key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
+    if not gemini_key:
+        env_file = PROJECT_ROOT / ".env"
+        if env_file.exists():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                if line.startswith("GEMINI_API_KEY=") or line.startswith("GOOGLE_API_KEY="):
+                    gemini_key = line.split("=", 1)[1].strip().strip('"')
+
+    if not gemini_key:
+        print("\n  Gemini API key not found.")
+        print("  For best results, enter your Gemini API key (or press Enter to skip):")
+        print("  (Get one free at: https://aistudio.google.com/apikey)")
+        user_key = input("  API Key> ").strip()
+        if user_key:
+            gemini_key = user_key
+            # Save for future use
+            env_file = PROJECT_ROOT / ".env"
+            with open(env_file, "a", encoding="utf-8") as f:
+                f.write(f"\nGEMINI_API_KEY={gemini_key}\n")
+            print(f"  Key saved to .env for future use")
+    else:
+        print(f"  Gemini API key found!")
+
+    analyzer = IdentityAnalyzer(device="cuda", gemini_api_key=gemini_key)
     try:
         features = analyzer.analyze(photos_dir, sample_count=10)
+        method = features.get("analysis_method", "local")
+        print(f"  Analysis method: {'Gemini Vision API' if method == 'gemini' else 'Local (InsightFace + OpenCV)'}")
     except Exception as e:
         print(f"  Warning: Auto-detection failed ({e}), using defaults")
         features = {
@@ -59,19 +86,30 @@ def main():
         }
 
     # Display detected features
-    print(f"\n  {'─' * 40}")
+    print(f"\n  {'─' * 50}")
     print(f"  Detected Identity:")
-    print(f"  {'─' * 40}")
-    print(f"  Gender:     {features.get('gender', 'unknown')}")
-    print(f"  Age:        ~{features.get('age_avg', '?')} ({features.get('age_range', '?')})")
-    print(f"  Hair:       {features.get('hair_color', '?')}")
-    print(f"  Bangs:      {'Yes' if features.get('has_bangs') else 'No'}")
-    print(f"  Skin:       {features.get('skin_tone', '?')}")
+    print(f"  {'─' * 50}")
+    print(f"  Gender:      {features.get('gender', 'unknown')}")
+    print(f"  Age:         ~{features.get('age_avg', '?')} ({features.get('age_range', '?')})")
+    print(f"  Hair color:  {features.get('hair_color', '?')}")
+    if features.get("hair_style"):
+        print(f"  Hair style:  {features.get('hair_style')}")
+    print(f"  Bangs:       {'Yes' if features.get('has_bangs') else 'No'}")
+    print(f"  Skin tone:   {features.get('skin_tone', '?')}")
     if features.get("ethnicity_hint"):
-        print(f"  Ethnicity:  {features.get('ethnicity_hint')}")
-    print(f"  {'─' * 40}")
+        print(f"  Ethnicity:   {features.get('ethnicity_hint')}")
+    if features.get("face_shape"):
+        print(f"  Face shape:  {features.get('face_shape')}")
+    if features.get("eye_shape"):
+        print(f"  Eye shape:   {features.get('eye_shape')}")
+    if features.get("notable_features"):
+        nf = features["notable_features"]
+        if isinstance(nf, list):
+            nf = ", ".join(nf)
+        print(f"  Features:    {nf}")
+    print(f"  {'─' * 50}")
     print(f"  Description: {features.get('description', '?')}")
-    print(f"  {'─' * 40}")
+    print(f"  {'─' * 50}")
 
     # Generate sample captions
     full_caps, face_caps = analyzer.generate_captions(features)

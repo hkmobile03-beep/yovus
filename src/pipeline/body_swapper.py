@@ -25,10 +25,170 @@ logger = logging.getLogger("yovus.body_swap")
 
 
 class IdentityAnalyzer:
-    """自动分析参照照片中的人物特征，生成精准提示词"""
+    """自动分析参照照片中的人物特征，生成精准提示词
 
-    def __init__(self, device: str = "cuda"):
+    Analysis methods (in priority order):
+    1. Gemini API (best quality - cloud vision model)
+    2. InsightFace + OpenCV (local fallback)
+    """
+
+    def __init__(self, device: str = "cuda", gemini_api_key: str = ""):
         self.device = device
+        self.gemini_api_key = gemini_api_key or self._load_gemini_key()
+
+    def _load_gemini_key(self) -> str:
+        """Try to load Gemini API key from environment or config"""
+        import os
+        # Check environment variables
+        for key_name in ["GEMINI_API_KEY", "GOOGLE_API_KEY"]:
+            val = os.environ.get(key_name, "")
+            if val:
+                return val
+        # Check .env file in project root
+        env_file = Path(__file__).parent.parent.parent / ".env"
+        if env_file.exists():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("GEMINI_API_KEY=") or line.startswith("GOOGLE_API_KEY="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+        return ""
+
+    def analyze_with_gemini(self, photos_dir: Path, sample_count: int = 5) -> Optional[dict]:
+        """Use Gemini Vision API to analyze person identity from photos.
+
+        Returns structured identity features or None if API unavailable.
+        """
+        if not self.gemini_api_key:
+            logger.info("Gemini API key not found, skipping vision analysis")
+            return None
+
+        import base64
+        import cv2
+
+        photos_dir = Path(photos_dir)
+        photo_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+        photos = sorted([f for f in photos_dir.iterdir() if f.suffix.lower() in photo_exts])
+        if not photos:
+            return None
+
+        # Select diverse samples
+        step = max(1, len(photos) // sample_count)
+        samples = photos[::step][:sample_count]
+
+        # Encode images to base64 (resize to save bandwidth)
+        image_parts = []
+        for photo_path in samples[:3]:  # Send 3 photos max to API
+            img = cv2.imread(str(photo_path))
+            if img is None:
+                continue
+            # Resize for API efficiency
+            h, w = img.shape[:2]
+            max_dim = 512
+            if max(h, w) > max_dim:
+                scale = max_dim / max(h, w)
+                img = cv2.resize(img, (int(w * scale), int(h * scale)))
+            _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            b64 = base64.b64encode(buf).decode("utf-8")
+            image_parts.append({
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": b64,
+                }
+            })
+
+        if not image_parts:
+            return None
+
+        # Build Gemini API request
+        prompt_text = (
+            "Analyze this person's physical appearance for AI training captions. "
+            "Return ONLY a JSON object with these exact fields:\n"
+            "{\n"
+            '  "gender": "female" or "male",\n'
+            '  "age_range": "young" (18-30) or "middle-aged" (30-50) or "elderly" (50+),\n'
+            '  "age_estimate": number,\n'
+            '  "ethnicity": "Asian" or "European" or "African" or "Latin" or "Middle Eastern" or "mixed",\n'
+            '  "hair_color": specific color like "black", "dark brown", "chestnut", "blonde", etc.,\n'
+            '  "hair_length": "short", "medium", or "long",\n'
+            '  "hair_style": brief description like "straight with bangs", "wavy", "ponytail", etc.,\n'
+            '  "has_bangs": true or false,\n'
+            '  "skin_tone": "fair", "light", "medium", "tan", or "dark",\n'
+            '  "face_shape": "oval", "round", "square", "heart", etc.,\n'
+            '  "eye_shape": "almond", "round", "monolid", etc.,\n'
+            '  "notable_features": brief list of distinctive features,\n'
+            '  "description_en": one sentence describing this person in English for AI image generation\n'
+            "}\n"
+            "Be precise and objective. The description should help an AI model "
+            "learn to generate images of this specific person."
+        )
+
+        # Build request parts: images + text prompt
+        parts = image_parts + [{"text": prompt_text}]
+
+        try:
+            import httpx
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/"
+                f"gemini-2.0-flash:generateContent?key={self.gemini_api_key}"
+            )
+
+            payload = {
+                "contents": [{"parts": parts}],
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "maxOutputTokens": 1024,
+                }
+            }
+
+            logger.info("Calling Gemini Vision API for identity analysis...")
+            resp = httpx.post(url, json=payload, timeout=60.0)
+            resp.raise_for_status()
+            data = resp.json()
+
+            # Extract text response
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+            logger.info(f"Gemini response: {text[:200]}...")
+
+            # Parse JSON from response (handle markdown code blocks)
+            import re
+            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL)
+            if not json_match:
+                logger.warning("Could not parse JSON from Gemini response")
+                return None
+
+            import json as json_mod
+            gemini_data = json_mod.loads(json_match.group())
+
+            # Convert Gemini output to our standard features format
+            features = {
+                "trigger_word": "sks",
+                "folder_name": photos_dir.name,
+                "photo_count": len(photos),
+                "gender": gemini_data.get("gender", "female"),
+                "age_range": gemini_data.get("age_range", "young"),
+                "age_avg": gemini_data.get("age_estimate", 25),
+                "hair_color": gemini_data.get("hair_color", "dark"),
+                "hair_length": gemini_data.get("hair_length", "medium"),
+                "hair_style": gemini_data.get("hair_style", ""),
+                "has_bangs": gemini_data.get("has_bangs", False),
+                "skin_tone": gemini_data.get("skin_tone", "medium"),
+                "ethnicity_hint": gemini_data.get("ethnicity", ""),
+                "face_shape": gemini_data.get("face_shape", ""),
+                "eye_shape": gemini_data.get("eye_shape", ""),
+                "notable_features": gemini_data.get("notable_features", ""),
+                "description": gemini_data.get("description_en", ""),
+                "analysis_method": "gemini",
+            }
+
+            # If Gemini didn't provide a description, build one
+            if not features["description"]:
+                features["description"] = self._build_description(features)
+
+            return features
+
+        except Exception as e:
+            logger.warning(f"Gemini API call failed: {e}")
+            return None
 
     def analyze(self, photos_dir: Path, sample_count: int = 10) -> dict:
         """
@@ -56,6 +216,17 @@ class IdentityAnalyzer:
 
         if not photos:
             raise ValueError(f"No photos found in {photos_dir}")
+
+        # ── Try Gemini Vision API first (best quality) ──
+        gemini_result = self.analyze_with_gemini(photos_dir, sample_count=5)
+        if gemini_result:
+            gemini_result["photo_count"] = len(photos)
+            gemini_result["folder_name"] = photos_dir.name
+            logger.info(f"Identity analyzed via Gemini: {gemini_result.get('description', '')}")
+            return gemini_result
+
+        # ── Fallback: local InsightFace + OpenCV analysis ──
+        logger.info("Using local analysis (InsightFace + OpenCV)")
 
         # Sample evenly across the folder
         step = max(1, len(photos) // sample_count)
@@ -290,31 +461,54 @@ class IdentityAnalyzer:
         return "a " + ", ".join(parts)
 
     def generate_captions(self, features: dict, count: int = 8) -> list:
-        """基于检测到的特征生成多样化的训练标注"""
-        tw = features["trigger_word"]
-        desc = features["description"]
-        gender = "woman" if features["gender"] == "female" else "man"
-        hair = features.get("hair_color", "dark")
-        bangs = ", bangs" if features.get("has_bangs") else ""
+        """基于检测到的特征生成多样化的训练标注
 
-        # Full image captions (varied descriptions)
+        Uses richer Gemini features (hair_style, face_shape, eye_shape) when available.
+        """
+        tw = features["trigger_word"]
+        desc = features.get("description", "a person")
+        gender = "woman" if features.get("gender") == "female" else "man"
+        hair = features.get("hair_color", "dark")
+        hair_style = features.get("hair_style", "")
+        bangs = ", bangs" if features.get("has_bangs") else ""
+        face_shape = features.get("face_shape", "")
+        eye_shape = features.get("eye_shape", "")
+
+        # Build rich hair description
+        hair_desc = f"{hair} hair"
+        if hair_style:
+            hair_desc = f"{hair} {hair_style} hair"
+        elif bangs:
+            hair_desc = f"{hair} hair with bangs"
+
+        # Build face detail (from Gemini)
+        face_detail = ""
+        if face_shape and eye_shape:
+            face_detail = f", {face_shape} face, {eye_shape} eyes"
+        elif face_shape:
+            face_detail = f", {face_shape} face"
+
+        # Full image captions (varied descriptions using all available features)
         full_captions = [
             f"a photo of {tw} person, {desc}, high quality, detailed face, sharp focus",
             f"a portrait of {tw} person, {desc}, professional photography, studio lighting",
             f"a photo of {tw} person, {desc}, natural lighting, high resolution",
             f"{tw} person, {desc}, front view, high quality photograph, detailed",
-            f"a professional photo of {tw} person, {gender} with {hair} hair{bangs}, detailed features",
-            f"a photo of {tw} person, {desc}, clear face, well-lit, sharp",
-            f"{tw} person, {gender}, {hair} hair{bangs}, high quality portrait",
-            f"a studio photo of {tw} person, {desc}, professional, detailed",
+            f"a professional photo of {tw} person, {gender} with {hair_desc}{face_detail}, detailed features, sharp",
+            f"a photo of {tw} person, {desc}, clear face, well-lit, sharp focus",
+            f"{tw} person, {gender}, {hair_desc}, high quality portrait, detailed",
+            f"a studio photo of {tw} person, {desc}, professional, high resolution",
+            f"a photo of {tw} person, {gender} with {hair_desc}{face_detail}, natural pose, detailed",
+            f"{tw} person, {desc}, side view, professional photography, sharp",
         ]
 
-        # Face close-up captions
+        # Face close-up captions (emphasize facial features)
         face_captions = [
-            f"a close up face photo of {tw} person, {desc}, detailed face, high quality, sharp focus",
-            f"a headshot of {tw} person, {gender} with {hair} hair{bangs}, studio quality, detailed facial features",
+            f"a close up face photo of {tw} person, {desc}, detailed face{face_detail}, high quality, sharp focus",
+            f"a headshot of {tw} person, {gender} with {hair_desc}{face_detail}, studio quality, detailed facial features",
             f"close up portrait of {tw} person, {desc}, clear face, professional photography",
-            f"face of {tw} person, {desc}, macro detail, sharp focus, high resolution",
+            f"face of {tw} person, {gender}{face_detail}, {hair_desc}, macro detail, sharp focus",
+            f"extreme close up of {tw} person face, {desc}, every detail visible, studio lighting",
         ]
 
         return full_captions[:count], face_captions[:max(2, count // 2)]
