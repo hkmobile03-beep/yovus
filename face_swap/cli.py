@@ -16,6 +16,7 @@ Workflow
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import List
@@ -27,6 +28,40 @@ from .fal_api import FalFaceSwap
 from .identity import Identity, cluster_identities
 from .source import pick_best_source_photo
 from .video import VideoScanner, ensure_max_height, probe
+
+
+# ---------------------------------------------------------------------- #
+# Minimal .env loader — reads KEY=VALUE pairs into os.environ without
+# pulling in python-dotenv. Existing environment variables win over the
+# file so you can always override by exporting inline.
+# ---------------------------------------------------------------------- #
+def _load_dotenv(paths: List[Path]) -> Path | None:
+    for path in paths:
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if (value.startswith('"') and value.endswith('"')) or (
+                value.startswith("'") and value.endswith("'")
+            ):
+                value = value[1:-1]
+            if key and key not in os.environ:
+                os.environ[key] = value
+        return path
+    return None
 
 
 # ---------------------------------------------------------------------- #
@@ -108,6 +143,13 @@ def _prompt_identity(identities: List[Identity]) -> Identity:
 
 # ---------------------------------------------------------------------- #
 def main(argv: List[str] | None = None) -> int:
+    # Load .env from the current working dir or the project root before we
+    # touch any env-dependent code. Existing env vars always win.
+    here = Path(__file__).resolve().parent.parent
+    loaded = _load_dotenv([Path.cwd() / ".env", here / ".env"])
+    if loaded is not None:
+        print(f"[env] loaded {loaded}")
+
     args = build_parser().parse_args(argv)
 
     target_path = Path(args.target)

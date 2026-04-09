@@ -29,3 +29,11 @@ frames/
 
 # Logs
 *.log
+
+# Secrets — NEVER commit these
+.env
+.env.*
+!.env.example
+.envrc
+secrets.*
+*.secret
