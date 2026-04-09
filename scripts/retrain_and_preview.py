@@ -386,6 +386,9 @@ def step5_verify(features, lora_output, analyzer):
 
 
 def main():
+    import logging
+    logging.basicConfig(level=logging.INFO, format="  [%(name)s] %(message)s")
+
     if len(sys.argv) < 2:
         print("Usage: python scripts/retrain_and_preview.py <photos_folder>")
         sys.exit(1)

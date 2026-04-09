@@ -53,54 +53,38 @@ class IdentityAnalyzer:
                     return line.split("=", 1)[1].strip().strip('"').strip("'")
         return ""
 
-    def analyze_with_gemini(self, photos_dir: Path, sample_count: int = 5) -> Optional[dict]:
-        """Use Gemini Vision API to analyze person identity from photos.
-
-        Returns structured identity features or None if API unavailable.
-        """
-        if not self.gemini_api_key:
-            logger.info("Gemini API key not found, skipping vision analysis")
-            return None
-
-        import base64
+    def _prepare_photo_samples(self, photos_dir: Path, sample_count: int = 5):
+        """Prepare photo samples for analysis (shared by SDK and HTTP methods)."""
         import cv2
 
         photos_dir = Path(photos_dir)
         photo_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
         photos = sorted([f for f in photos_dir.iterdir() if f.suffix.lower() in photo_exts])
         if not photos:
-            return None
+            return photos, []
 
-        # Select diverse samples
         step = max(1, len(photos) // sample_count)
         samples = photos[::step][:sample_count]
 
-        # Encode images to base64 (resize to save bandwidth)
-        image_parts = []
-        for photo_path in samples[:3]:  # Send 3 photos max to API
+        # Resize images for API efficiency
+        processed = []
+        for photo_path in samples[:3]:
             img = cv2.imread(str(photo_path))
             if img is None:
                 continue
-            # Resize for API efficiency
             h, w = img.shape[:2]
             max_dim = 512
             if max(h, w) > max_dim:
                 scale = max_dim / max(h, w)
                 img = cv2.resize(img, (int(w * scale), int(h * scale)))
             _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            b64 = base64.b64encode(buf).decode("utf-8")
-            image_parts.append({
-                "inline_data": {
-                    "mime_type": "image/jpeg",
-                    "data": b64,
-                }
-            })
+            processed.append((photo_path, buf))
 
-        if not image_parts:
-            return None
+        return photos, processed
 
-        # Build Gemini API request
-        prompt_text = (
+    def _get_gemini_prompt(self) -> str:
+        """Get the standard analysis prompt for Gemini."""
+        return (
             "Analyze this person's physical appearance for AI training captions. "
             "Return ONLY a JSON object with these exact fields:\n"
             "{\n"
@@ -122,105 +106,203 @@ class IdentityAnalyzer:
             "learn to generate images of this specific person."
         )
 
-        # Build request parts: images + text prompt
-        parts = image_parts + [{"text": prompt_text}]
+    def _parse_gemini_response(self, text: str, photos_dir: Path, photos: list) -> Optional[dict]:
+        """Parse Gemini response text into features dict."""
+        import re
+        import json as json_mod
 
+        logger.info(f"Gemini response: {text[:300]}...")
+
+        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL)
+        if not json_match:
+            logger.warning("Could not parse JSON from Gemini response")
+            return None
+
+        gemini_data = json_mod.loads(json_match.group())
+
+        features = {
+            "trigger_word": "sks",
+            "folder_name": photos_dir.name,
+            "photo_count": len(photos),
+            "gender": gemini_data.get("gender", "female"),
+            "age_range": gemini_data.get("age_range", "young"),
+            "age_avg": gemini_data.get("age_estimate", 25),
+            "hair_color": gemini_data.get("hair_color", "dark"),
+            "hair_length": gemini_data.get("hair_length", "medium"),
+            "hair_style": gemini_data.get("hair_style", ""),
+            "has_bangs": gemini_data.get("has_bangs", False),
+            "skin_tone": gemini_data.get("skin_tone", "medium"),
+            "ethnicity_hint": gemini_data.get("ethnicity", ""),
+            "face_shape": gemini_data.get("face_shape", ""),
+            "eye_shape": gemini_data.get("eye_shape", ""),
+            "notable_features": gemini_data.get("notable_features", ""),
+            "description": gemini_data.get("description_en", ""),
+            "analysis_method": "gemini",
+        }
+
+        if not features["description"]:
+            features["description"] = self._build_description(features)
+
+        return features
+
+    def _analyze_with_gemini_sdk(self, photos_dir: Path, photos: list, processed: list) -> Optional[dict]:
+        """Use official google-generativeai SDK (most reliable method)."""
+        try:
+            import google.generativeai as genai
+            from PIL import Image
+            import io
+        except ImportError:
+            logger.info("google-generativeai not installed, skipping SDK method")
+            return None
+
+        genai.configure(api_key=self.gemini_api_key)
+
+        # Models to try with SDK (it handles endpoint routing automatically)
+        sdk_models = [
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
+        ]
+
+        # Convert processed images to PIL for SDK
+        pil_images = []
+        for _, buf in processed:
+            img_bytes = buf.tobytes()
+            pil_images.append(Image.open(io.BytesIO(img_bytes)))
+
+        prompt_text = self._get_gemini_prompt()
+
+        for model_name in sdk_models:
+            try:
+                logger.info(f"Trying Gemini SDK model: {model_name}...")
+                model = genai.GenerativeModel(model_name)
+
+                # Build content: images + text
+                content_parts = list(pil_images) + [prompt_text]
+                response = model.generate_content(
+                    content_parts,
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=0.1,
+                        max_output_tokens=1024,
+                    ),
+                )
+
+                if response.text:
+                    logger.info(f"Gemini SDK success with model: {model_name}")
+                    return self._parse_gemini_response(response.text, photos_dir, photos)
+
+            except Exception as e:
+                err_str = str(e)
+                logger.debug(f"SDK model {model_name} failed: {err_str[:200]}")
+                continue
+
+        logger.info("All Gemini SDK models failed")
+        return None
+
+    def _analyze_with_gemini_http(self, photos_dir: Path, photos: list, processed: list) -> Optional[dict]:
+        """Fallback: raw HTTP requests to Gemini API."""
         try:
             import httpx
+            import base64
+        except ImportError:
+            logger.info("httpx not installed, skipping HTTP method")
+            return None
 
-            # Vision-capable models only (lite models don't support images)
-            model_candidates = [
-                "gemini-1.5-flash",
-                "gemini-1.5-flash-latest",
-                "gemini-2.0-flash",
-                "gemini-1.5-pro",
-                "gemini-pro-vision",
-            ]
-
-            payload = {
-                "contents": [{"parts": parts}],
-                "generationConfig": {
-                    "temperature": 0.1,
-                    "maxOutputTokens": 1024,
+        # Build image parts for HTTP API
+        image_parts = []
+        for _, buf in processed:
+            b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
+            image_parts.append({
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": b64,
                 }
-            }
+            })
 
-            logger.info("Calling Gemini Vision API for identity analysis...")
-            resp = None
-            used_model = None
+        if not image_parts:
+            return None
+
+        prompt_text = self._get_gemini_prompt()
+        parts = image_parts + [{"text": prompt_text}]
+
+        payload = {
+            "contents": [{"parts": parts}],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 1024,
+            }
+        }
+
+        # Try both v1 and v1beta endpoints, multiple models
+        model_candidates = [
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-latest",
+            "gemini-1.5-pro",
+            "gemini-pro-vision",
+        ]
+        api_versions = ["v1beta", "v1"]
+
+        for api_ver in api_versions:
             for model_name in model_candidates:
                 url = (
-                    f"https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"https://generativelanguage.googleapis.com/{api_ver}/models/"
                     f"{model_name}:generateContent?key={self.gemini_api_key}"
                 )
                 try:
+                    logger.debug(f"HTTP trying {api_ver}/{model_name}...")
                     resp = httpx.post(url, json=payload, timeout=60.0)
                     if resp.status_code == 200:
-                        used_model = model_name
-                        break
+                        data = resp.json()
+                        text = data["candidates"][0]["content"]["parts"][0]["text"]
+                        logger.info(f"HTTP success: {api_ver}/{model_name}")
+                        return self._parse_gemini_response(text, photos_dir, photos)
                     else:
                         error_detail = ""
                         try:
                             error_detail = resp.json().get("error", {}).get("message", "")
                         except Exception:
                             error_detail = resp.text[:200]
-                        logger.debug(f"Model {model_name}: HTTP {resp.status_code} - {error_detail}")
-                        continue
+                        logger.debug(f"{api_ver}/{model_name}: HTTP {resp.status_code} - {error_detail}")
                 except Exception as req_err:
-                    logger.debug(f"Model {model_name}: request error - {req_err}")
+                    logger.debug(f"{api_ver}/{model_name}: {req_err}")
                     continue
 
-            if resp is None or resp.status_code != 200:
-                logger.warning("All Gemini models failed. Using local analysis.")
-                return None
+        logger.info("All HTTP Gemini endpoints failed")
+        return None
 
-            logger.info(f"Using Gemini model: {used_model}")
-            data = resp.json()
+    def analyze_with_gemini(self, photos_dir: Path, sample_count: int = 5) -> Optional[dict]:
+        """Use Gemini Vision API to analyze person identity from photos.
 
-            # Extract text response
-            text = data["candidates"][0]["content"]["parts"][0]["text"]
-            logger.info(f"Gemini response: {text[:200]}...")
+        Tries two methods in order:
+        1. Official google-generativeai SDK (handles model routing automatically)
+        2. Raw HTTP requests (fallback, tries v1 and v1beta endpoints)
 
-            # Parse JSON from response (handle markdown code blocks)
-            import re
-            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL)
-            if not json_match:
-                logger.warning("Could not parse JSON from Gemini response")
-                return None
-
-            import json as json_mod
-            gemini_data = json_mod.loads(json_match.group())
-
-            # Convert Gemini output to our standard features format
-            features = {
-                "trigger_word": "sks",
-                "folder_name": photos_dir.name,
-                "photo_count": len(photos),
-                "gender": gemini_data.get("gender", "female"),
-                "age_range": gemini_data.get("age_range", "young"),
-                "age_avg": gemini_data.get("age_estimate", 25),
-                "hair_color": gemini_data.get("hair_color", "dark"),
-                "hair_length": gemini_data.get("hair_length", "medium"),
-                "hair_style": gemini_data.get("hair_style", ""),
-                "has_bangs": gemini_data.get("has_bangs", False),
-                "skin_tone": gemini_data.get("skin_tone", "medium"),
-                "ethnicity_hint": gemini_data.get("ethnicity", ""),
-                "face_shape": gemini_data.get("face_shape", ""),
-                "eye_shape": gemini_data.get("eye_shape", ""),
-                "notable_features": gemini_data.get("notable_features", ""),
-                "description": gemini_data.get("description_en", ""),
-                "analysis_method": "gemini",
-            }
-
-            # If Gemini didn't provide a description, build one
-            if not features["description"]:
-                features["description"] = self._build_description(features)
-
-            return features
-
-        except Exception as e:
-            logger.warning(f"Gemini API call failed: {e}")
+        Returns structured identity features or None if API unavailable.
+        """
+        if not self.gemini_api_key:
+            logger.info("Gemini API key not found, skipping vision analysis")
             return None
+
+        photos_dir = Path(photos_dir)
+        photos, processed = self._prepare_photo_samples(photos_dir, sample_count)
+        if not processed:
+            return None
+
+        logger.info(f"Analyzing {len(processed)} photos with Gemini API...")
+
+        # Method 1: Official SDK (most reliable)
+        result = self._analyze_with_gemini_sdk(photos_dir, photos, processed)
+        if result:
+            return result
+
+        # Method 2: Raw HTTP (fallback)
+        result = self._analyze_with_gemini_http(photos_dir, photos, processed)
+        if result:
+            return result
+
+        logger.warning("All Gemini methods failed. Will use local analysis.")
+        return None
 
     def analyze(self, photos_dir: Path, sample_count: int = 10) -> dict:
         """
