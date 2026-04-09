@@ -565,6 +565,59 @@ class LoRATrainer:
         self.device = device
         self.vram_limit_gb = vram_limit_gb
 
+    @staticmethod
+    def auto_config(image_count: int, base_steps: int = 1500) -> dict:
+        """根据训练图片数量自动调整LoRA参数
+
+        Expert-validated configuration:
+        - 少图(<30): 低rank避免过拟合, 低LR, 更多epochs
+        - 中图(30-100): 标准配置
+        - 多图(100+): 高rank增加容量, 标准LR
+        """
+        if image_count < 15:
+            rank = 8
+            lr = 5e-5
+            steps = max(base_steps, image_count * 20)  # ~20 epochs
+            alpha_mult = 1.5
+            reason = f"少量图片({image_count}枚): 低rank防止过拟合, 低LR, 多epochs"
+        elif image_count < 30:
+            rank = 8
+            lr = 8e-5
+            steps = max(base_steps, image_count * 15)  # ~15 epochs
+            alpha_mult = 1.5
+            reason = f"少量図片({image_count}枚): rank=8, 控えめなLR"
+        elif image_count < 100:
+            rank = 16
+            lr = 1e-4
+            steps = max(base_steps, image_count * 10)  # ~10 epochs
+            alpha_mult = 2.0
+            reason = f"標準({image_count}枚): rank=16, 標準LR"
+        elif image_count < 200:
+            rank = 24
+            lr = 1e-4
+            steps = max(base_steps, image_count * 8)  # ~8 epochs
+            alpha_mult = 2.0
+            reason = f"大量({image_count}枚): rank=24, 高容量"
+        else:
+            rank = 32
+            lr = 1e-4
+            steps = max(base_steps, image_count * 6)  # ~6 epochs
+            alpha_mult = 2.0
+            reason = f"超大量({image_count}枚): rank=32, 最大容量"
+
+        # Cap steps at reasonable max for 8GB VRAM (~30 min)
+        steps = min(steps, 5000)
+
+        return {
+            "rank": rank,
+            "lr": lr,
+            "steps": steps,
+            "alpha_multiplier": alpha_mult,
+            "epochs_approx": round(steps / max(1, image_count), 1),
+            "reason": reason,
+            "image_count": image_count,
+        }
+
     def prepare_training_data(
         self,
         photos_dir: Path,
