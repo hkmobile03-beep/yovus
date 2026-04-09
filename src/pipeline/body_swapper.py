@@ -224,14 +224,19 @@ class LoRATrainer:
         self, data_dir, output_dir, base_model,
         steps, rank, lr, trigger_word, batch_size, callback=None,
     ) -> Path:
-        """Real local training loop using diffusers + PEFT"""
+        """Real local training loop using diffusers + PEFT
+
+        Key fixes for identity preservation:
+        - Per-image captions with pre-computed text embeddings
+        - Correct PEFT target_modules (module names, not paths)
+        - Adaptive training steps based on dataset size
+        - PEFT native save format for reliable loading
+        """
         import torch
-        from torch.utils.data import Dataset, DataLoader
         from diffusers import AutoencoderKL, UNet2DConditionModel, DDPMScheduler
         from transformers import CLIPTextModel, CLIPTokenizer
         from peft import LoraConfig, get_peft_model
         from PIL import Image
-        import cv2
 
         device = self.device
         dtype = torch.float16
@@ -239,50 +244,73 @@ class LoRATrainer:
         if callback:
             callback("モデルロード中...")
 
-        # 1) Load tokenizer + text encoder → encode prompt → move to CPU
+        # 1) Discover training images and their captions
+        img_dir = Path(data_dir)
+        image_files = sorted(img_dir.glob("*.png"))
+        if not image_files:
+            raise ValueError(f"No training images found in {img_dir}")
+
+        # Limit images for 8GB VRAM
+        max_images = min(len(image_files), 300)
+        if len(image_files) > max_images:
+            if callback:
+                callback(f"注意: VRAM制限のため {max_images}/{len(image_files)} 枚のみ使用")
+        image_files = image_files[:max_images]
+
+        # Adaptive steps: at least 8 epochs for strong identity learning
+        min_steps = max(steps, len(image_files) * 8)
+        if min_steps > steps:
+            if callback:
+                callback(f"ステップ数を自動調整: {steps} → {min_steps} ({len(image_files)}枚 × 8エポック)")
+            steps = min_steps
+
+        # Read per-image captions from .txt files
+        default_caption = f"a photo of {trigger_word} person, high quality, detailed"
+        captions = []
+        for img_path in image_files:
+            txt_path = img_path.with_suffix(".txt")
+            if txt_path.exists():
+                cap = txt_path.read_text(encoding="utf-8").strip()
+                captions.append(cap if cap else default_caption)
+            else:
+                captions.append(default_caption)
+
+        # 2) Load tokenizer + text encoder → pre-compute embeddings for ALL unique captions
         tokenizer = CLIPTokenizer.from_pretrained(base_model, subfolder="tokenizer")
         text_encoder = CLIPTextModel.from_pretrained(
             base_model, subfolder="text_encoder", torch_dtype=dtype,
         ).to(device)
 
-        prompt = f"a photo of {trigger_word} person, high quality, detailed"
-        tokens = tokenizer(
-            prompt, padding="max_length", max_length=tokenizer.model_max_length,
-            truncation=True, return_tensors="pt",
-        ).input_ids.to(device)
+        unique_captions = list(set(captions))
+        caption_to_embed = {}
+        if callback:
+            callback(f"テキスト埋め込み計算中... ({len(unique_captions)} 種類のキャプション)")
 
-        with torch.no_grad():
-            text_embeds = text_encoder(tokens)[0]  # (1, 77, 768)
+        for caption in unique_captions:
+            tokens = tokenizer(
+                caption, padding="max_length", max_length=tokenizer.model_max_length,
+                truncation=True, return_tensors="pt",
+            ).input_ids.to(device)
+            with torch.no_grad():
+                embed = text_encoder(tokens)[0].cpu()  # (1, 77, 768)
+            caption_to_embed[caption] = embed
+
+        # Build per-image embedding list (same order as image_files)
+        image_embeds = [caption_to_embed[c] for c in captions]
 
         # Free text encoder VRAM
-        del text_encoder
+        del text_encoder, tokenizer
         torch.cuda.empty_cache()
         gc.collect()
 
         if callback:
             callback("VAE latents キャッシュ中...")
 
-        # 2) Load VAE → cache latents → free VAE
+        # 3) Load VAE → cache latents → free VAE
         vae = AutoencoderKL.from_pretrained(
             base_model, subfolder="vae", torch_dtype=dtype,
         ).to(device)
         vae.eval()
-
-        img_dir = Path(data_dir)
-        image_files = sorted(img_dir.glob("*.png"))
-        if not image_files:
-            raise ValueError(f"No training images found in {img_dir}")
-
-        # Limit to reasonable number for 8GB VRAM training
-        max_images = min(len(image_files), 300)
-        if len(image_files) > max_images:
-            logger.warning(
-                f"Training uses {max_images}/{len(image_files)} images "
-                f"(VRAM limit). Remaining {len(image_files) - max_images} images skipped."
-            )
-            if callback:
-                callback(f"注意: VRAM制限のため {max_images}/{len(image_files)} 枚のみ使用")
-        image_files = image_files[:max_images]
 
         latent_cache = []
         for i, img_path in enumerate(image_files):
@@ -306,21 +334,21 @@ class LoRATrainer:
             callback(f"学習データ: {len(latent_cache)} 枚キャッシュ済み")
             callback("UNet + LoRA 準備中...")
 
-        # 3) Load UNet → apply LoRA → prepare training
+        # 4) Load UNet → apply LoRA → prepare training
         unet = UNet2DConditionModel.from_pretrained(
             base_model, subfolder="unet", torch_dtype=dtype,
         ).to(device)
 
         unet.enable_gradient_checkpointing()
 
-        # Apply LoRA - target cross-attention + self-attention + feedforward for stronger identity
+        # Apply LoRA - target attention + projection layers
+        # PEFT matches by module NAME (final component), not full dotted path
         lora_config = LoraConfig(
             r=rank,
-            lora_alpha=rank * 2,  # scaling = 2.0 for stronger identity preservation
+            lora_alpha=rank * 2,  # alpha/r = 2.0 for stronger identity
             target_modules=[
-                "to_k", "to_q", "to_v", "to_out.0",  # cross-attention
-                "ff.net.0.proj", "ff.net.2",  # feedforward layers (carry identity info)
-                "proj_in", "proj_out",  # projection layers
+                "to_k", "to_q", "to_v", "to_out.0",  # attention layers
+                "proj_in", "proj_out",  # transformer block projections
             ],
             lora_dropout=0.05,
         )
@@ -332,24 +360,21 @@ class LoRATrainer:
             callback(f"LoRA パラメータ: {trainable:,} / {total_params:,} ({100*trainable/total_params:.2f}%)")
 
         # Noise scheduler
-        scheduler = DDPMScheduler.from_pretrained(base_model, subfolder="scheduler")
+        noise_scheduler = DDPMScheduler.from_pretrained(base_model, subfolder="scheduler")
 
-        # Optimizer - ONLY trainable params (saves ~860MB VRAM)
+        # Optimizer - ONLY trainable params
         trainable_params = [p for p in unet.parameters() if p.requires_grad]
         try:
             import bitsandbytes as bnb
-            optimizer = bnb.optim.AdamW8bit(
-                trainable_params, lr=lr, weight_decay=1e-2,
-            )
+            optimizer = bnb.optim.AdamW8bit(trainable_params, lr=lr, weight_decay=1e-2)
             if callback:
                 callback("オプティマイザ: AdamW 8bit (VRAM節約)")
         except Exception:
-            # bitsandbytes can fail with RuntimeError/OSError on Windows (DLL issues)
             optimizer = torch.optim.AdamW(trainable_params, lr=lr, weight_decay=1e-2)
             if callback:
                 callback("オプティマイザ: AdamW (標準)")
 
-        # Mixed precision scaler for stable fp16 training
+        # Mixed precision scaler
         scaler = torch.amp.GradScaler("cuda")
 
         # Learning rate scheduler - cosine annealing with warmup
@@ -358,13 +383,12 @@ class LoRATrainer:
             optimizer, T_max=steps - warmup_steps, eta_min=lr * 0.1,
         )
 
-        # 4) Training loop
+        # 5) Training loop
         unet.train()
         num_latents = len(latent_cache)
-        text_embeds_expanded = text_embeds.to(device, dtype=dtype)
 
         if callback:
-            callback(f"学習開始: {steps} steps (warmup: {warmup_steps})...")
+            callback(f"学習開始: {steps} steps (warmup: {warmup_steps}, データ: {num_latents}枚)...")
 
         for step in range(steps):
             # Linear warmup
@@ -373,26 +397,28 @@ class LoRATrainer:
                 for pg in optimizer.param_groups:
                     pg['lr'] = warmup_lr
 
-            # Random latent from cache (random sampling, not sequential)
+            # Random latent + MATCHING text embedding
             lat_idx = torch.randint(0, num_latents, (1,)).item()
             latent = latent_cache[lat_idx].to(device, dtype=dtype)
+            text_embed = image_embeds[lat_idx].to(device, dtype=dtype)
 
-            # Random noise
+            # Random noise + timestep
             noise = torch.randn_like(latent)
-            timestep = torch.randint(0, scheduler.config.num_train_timesteps, (1,), device=device).long()
+            timestep = torch.randint(
+                0, noise_scheduler.config.num_train_timesteps, (1,), device=device
+            ).long()
 
-            # Add noise
-            noisy_latent = scheduler.add_noise(latent, noise, timestep)
+            noisy_latent = noise_scheduler.add_noise(latent, noise, timestep)
 
-            # Forward pass with mixed precision
+            # Forward pass
             with torch.amp.autocast("cuda"):
                 noise_pred = unet(
                     noisy_latent, timestep,
-                    encoder_hidden_states=text_embeds_expanded,
+                    encoder_hidden_states=text_embed,
                 ).sample
                 loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
 
-            # Backward pass with gradient scaling
+            # Backward pass
             optimizer.zero_grad()
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -400,7 +426,6 @@ class LoRATrainer:
             scaler.step(optimizer)
             scaler.update()
 
-            # Step LR scheduler after warmup
             if step >= warmup_steps:
                 lr_scheduler.step()
 
@@ -408,18 +433,17 @@ class LoRATrainer:
                 current_lr = optimizer.param_groups[0]['lr']
                 callback(f"Step {step+1}/{steps} | Loss: {loss.item():.4f} | LR: {current_lr:.2e}")
 
-            # Save checkpoint
             if (step + 1) % max(1, steps // 3) == 0:
                 self._save_lora_diffusers(unet, output_dir / f"checkpoint-{step+1}")
 
-        # 5) Save final weights in diffusers-compatible format
+        # 6) Save final weights
         if callback:
             callback("LoRA 重み保存中...")
 
         self._save_lora_diffusers(unet, output_dir)
 
         unet.eval()
-        del optimizer, latent_cache, scaler
+        del optimizer, latent_cache, image_embeds, scaler, lr_scheduler
         torch.cuda.empty_cache()
         gc.collect()
 
