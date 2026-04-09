@@ -6,9 +6,10 @@ the half-moon-ai/ai-face-swap/faceswapvideo endpoint on Fal.ai. This is the
 cheap + fast cloud alternative to running Facefusion locally.
 
 Auth:
-  Set FAL_KEY environment variable. NEVER hardcode the key.
-    PowerShell (temp):  $env:FAL_KEY = "your_key"
-    PowerShell (perm):  [Environment]::SetEnvironmentVariable("FAL_KEY","your_key","User")
+  The script looks for FAL_KEY in this order:
+    1. FAL_KEY environment variable
+    2. .env file at the project root (key=value lines, gitignored)
+  Never hardcode the key in tracked source.
 
 Usage:
   python scripts/cloud_video_swap.py <input_video> <reference_photo_or_folder>
@@ -67,6 +68,26 @@ def default_output(input_path: Path, is_image: bool) -> Path:
     return out_dir / f"{input_path.stem}_swapped{suffix}"
 
 
+def load_dotenv_into_environ():
+    """Minimal .env loader. Reads PROJECT_ROOT/.env and populates os.environ
+    for any keys that are not already set. No dependency on python-dotenv."""
+    env_file = PROJECT_ROOT / ".env"
+    if not env_file.exists():
+        return
+    try:
+        for raw in env_file.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except Exception as e:
+        print(f"  WARNING: failed to parse .env: {e}")
+
+
 def require_fal_client():
     try:
         import fal_client  # noqa: F401
@@ -78,13 +99,15 @@ def require_fal_client():
 
 
 def require_api_key():
+    load_dotenv_into_environ()
     key = os.environ.get("FAL_KEY", "").strip()
     if not key:
-        print("  ERROR: FAL_KEY environment variable not set")
+        print("  ERROR: FAL_KEY not found")
         print()
-        print("  Set it in PowerShell:")
-        print('    $env:FAL_KEY = "your_key"                                              # current session')
-        print('    [Environment]::SetEnvironmentVariable("FAL_KEY","your_key","User")     # persistent')
+        print("  Provide it via either:")
+        print("    1. A .env file at project root containing:")
+        print("         FAL_KEY=your_key")
+        print("    2. PowerShell:  $env:FAL_KEY = \"your_key\"")
         print()
         print("  Get your key at: https://fal.ai/dashboard/keys")
         sys.exit(1)
