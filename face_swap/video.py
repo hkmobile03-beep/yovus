@@ -67,10 +67,9 @@ class VideoScanner:
         self.sample_fps = sample_fps
         self.max_samples = max_samples
 
-    def iter_sample_frames(
-        self, video_path: str
+    def _iter_sample_frames_with_info(
+        self, info: VideoInfo
     ) -> Iterator[Tuple[int, np.ndarray]]:
-        info = probe(video_path)
         cap = cv2.VideoCapture(str(info.path))
         if not cap.isOpened():
             raise RuntimeError(f"Failed to open video: {info.path}")
@@ -92,13 +91,30 @@ class VideoScanner:
         finally:
             cap.release()
 
+    def iter_sample_frames(
+        self, video_path: str
+    ) -> Iterator[Tuple[int, np.ndarray]]:
+        """Public iterator — probes the video path and yields sampled frames."""
+        info = probe(video_path)
+        yield from self._iter_sample_frames_with_info(info)
+
     def scan(self, video_path: str) -> Tuple[VideoInfo, List[DetectedFace]]:
         info = probe(video_path)
-        total_samples = (
-            int(info.duration_sec * self.sample_fps) if info.duration_sec else None
-        )
-        if self.max_samples is not None and total_samples:
-            total_samples = min(total_samples, self.max_samples)
+        if info.frame_count <= 0 or info.fps <= 0:
+            raise RuntimeError(
+                f"Video has no readable frames (fps={info.fps}, "
+                f"frame_count={info.frame_count}): {info.path}"
+            )
+
+        total_samples: Optional[int] = None
+        if info.duration_sec:
+            total_samples = max(1, int(info.duration_sec * self.sample_fps))
+        if self.max_samples is not None:
+            total_samples = (
+                min(total_samples, self.max_samples)
+                if total_samples is not None
+                else self.max_samples
+            )
 
         all_faces: List[DetectedFace] = []
         progress = tqdm(
@@ -108,7 +124,7 @@ class VideoScanner:
             leave=False,
         )
         try:
-            for frame_idx, frame in self.iter_sample_frames(video_path):
+            for frame_idx, frame in self._iter_sample_frames_with_info(info):
                 faces = self.detector.detect(frame, frame_index=frame_idx)
                 all_faces.extend(faces)
                 progress.update(1)
@@ -144,11 +160,16 @@ def ensure_max_height(
 ) -> Path:
     """Re-encode ``input_video`` so its height is at most ``max_height``.
 
-    If the video is already small enough, the file is returned as-is (no
-    transcoding). Otherwise ffmpeg scales keeping the aspect ratio, ensures
-    dimensions are even, and writes H.264 + AAC to ``output_video``.
+    If ``max_height`` is ``<= 0`` the check is disabled and the source file
+    is returned as-is. If the video is already small enough, the file is
+    returned as-is (no transcoding). Otherwise ffmpeg scales keeping the
+    aspect ratio, ensures dimensions are even, and writes H.264 + AAC to
+    ``output_video``.
     """
     src = Path(input_video)
+    if max_height <= 0:
+        return src
+
     dst = Path(output_video)
     info = probe(str(src))
 

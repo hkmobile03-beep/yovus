@@ -53,8 +53,14 @@ class FalFaceSwap:
                 "Export it or pass api_key= to FalFaceSwap()."
             )
 
-        # Lazy import so `--help` works without the dep installed.
-        import fal_client  # type: ignore
+        # Lazy import so `--help` and dry-run work without the dep installed.
+        try:
+            import fal_client  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                "fal-client is not installed. Run "
+                "`pip install -r requirements.txt` (or `pip install fal-client`)."
+            ) from exc
 
         self._fal = fal_client
         self.endpoint = endpoint
@@ -65,7 +71,13 @@ class FalFaceSwap:
         p = Path(path)
         if not p.is_file():
             raise FileNotFoundError(f"Cannot upload — file not found: {p}")
-        return self._fal.upload_file(str(p))
+        url = self._fal.upload_file(str(p))
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            raise RuntimeError(
+                f"fal_client.upload_file returned an unexpected value for "
+                f"{p}: {url!r}"
+            )
+        return url
 
     # ------------------------------------------------------------------ #
     def submit(

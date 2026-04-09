@@ -61,7 +61,10 @@ class FaceDetector:
         self.app = insightface.app.FaceAnalysis(
             name=model_name, providers=list(providers)
         )
-        self.app.prepare(ctx_id=0, det_size=(det_size, det_size))
+        # ctx_id=-1 tells insightface to treat this as CPU-only so it
+        # does not try to pin CUDA device 0 on GPU-less hosts.
+        ctx_id = 0 if "CUDAExecutionProvider" in providers else -1
+        self.app.prepare(ctx_id=ctx_id, det_size=(det_size, det_size))
         self.providers = list(providers)
 
     # ------------------------------------------------------------------ #
@@ -71,12 +74,32 @@ class FaceDetector:
         frame_index: int = -1,
         crop_margin: float = 0.3,
     ) -> List[DetectedFace]:
-        """Detect all faces in a BGR image and return ``DetectedFace`` records."""
+        """Detect all faces in a BGR image and return ``DetectedFace`` records.
+
+        Faces whose bounding box is malformed (NaN, zero area, fully outside
+        the frame) or that have no embedding are skipped silently.
+        """
+        if image is None or image.size == 0:
+            return []
         raw = self.app.get(image)
         results: List[DetectedFace] = []
         h, w = image.shape[:2]
         for face in raw:
-            x1, y1, x2, y2 = face.bbox.astype(int).tolist()
+            bbox = getattr(face, "bbox", None)
+            if bbox is None:
+                continue
+            bbox = np.asarray(bbox, dtype=np.float32)
+            if bbox.shape != (4,) or not np.all(np.isfinite(bbox)):
+                continue
+            x1, y1, x2, y2 = bbox.astype(int).tolist()
+            # Clamp to image bounds, reject degenerate boxes.
+            x1 = max(0, min(w - 1, x1))
+            y1 = max(0, min(h - 1, y1))
+            x2 = max(0, min(w, x2))
+            y2 = max(0, min(h, y2))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
             # Expand crop a bit so the thumbnail shows more than just the tight box.
             bw, bh = x2 - x1, y2 - y1
             mx, my = int(bw * crop_margin), int(bh * crop_margin)
@@ -85,13 +108,21 @@ class FaceDetector:
             cx2 = min(w, x2 + mx)
             cy2 = min(h, y2 + my)
             thumb = image[cy1:cy2, cx1:cx2].copy()
+            if thumb.size == 0:
+                continue
 
-            emb = face.normed_embedding.astype(np.float32)
+            emb = getattr(face, "normed_embedding", None)
+            if emb is None:
+                continue
+            emb = np.asarray(emb, dtype=np.float32)
+            if emb.size == 0 or not np.all(np.isfinite(emb)):
+                continue
+
             results.append(
                 DetectedFace(
                     frame_index=frame_index,
                     bbox=(x1, y1, x2, y2),
-                    det_score=float(face.det_score),
+                    det_score=float(getattr(face, "det_score", 0.0)),
                     embedding=emb,
                     image=thumb,
                 )

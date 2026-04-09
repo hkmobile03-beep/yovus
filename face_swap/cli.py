@@ -48,7 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
                              "(default: ./previews).")
     parser.add_argument("--max-height", type=int, default=1080,
                         help="Downscale target video to at most this height "
-                             "before uploading (default: 1080).")
+                             "before uploading (default: 1080). Use 0 or a "
+                             "negative value to disable the downscale step.")
     parser.add_argument("--sample-fps", type=float, default=1.0,
                         help="Frames per second to sample during local scan "
                              "(default: 1.0).")
@@ -179,7 +180,7 @@ def main(argv: List[str] | None = None) -> int:
         str(tmp_dir / f"{target_path.stem}_{args.max_height}p.mp4"),
         max_height=args.max_height,
     )
-    if scaled_target != target_path:
+    if scaled_target.resolve() != target_path.resolve():
         print(f"[preprocess] using downscaled copy: {scaled_target}")
 
     # ---------------- 7. Call fal ---------------- #
