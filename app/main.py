@@ -1,14 +1,14 @@
 """中国电商财务对账系统 - 主入口"""
 
-import os
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.v1 import router as v1_router
+from app.database import engine, Base
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
 
@@ -50,6 +50,13 @@ app.add_middleware(
 
 # 注册路由
 app.include_router(v1_router)
+
+
+@app.on_event("startup")
+async def startup():
+    from app.models import order, finance, reconciliation, platform_fee, tax, budget, product  # noqa: F401
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
 
 @app.get("/health")
